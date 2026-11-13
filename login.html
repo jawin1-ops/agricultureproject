@@ -1,0 +1,240 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Login – Agriculture Information System</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: linear-gradient(135deg, #1a4731 0%, #2d7a4f 50%, #4caf50 100%);
+    font-family: 'Segoe UI', system-ui, sans-serif;
+  }
+
+  .card {
+    background: #fff;
+    border-radius: 16px;
+    box-shadow: 0 20px 60px rgba(0,0,0,.25);
+    width: 100%;
+    max-width: 420px;
+    padding: 48px 40px 40px;
+  }
+
+  .logo {
+    text-align: center;
+    margin-bottom: 32px;
+  }
+  .logo svg { width: 56px; height: 56px; }
+  .logo h1 {
+    font-size: 1.3rem;
+    font-weight: 700;
+    color: #1a4731;
+    margin-top: 10px;
+    line-height: 1.3;
+  }
+  .logo p {
+    font-size: .8rem;
+    color: #6b7280;
+    margin-top: 4px;
+  }
+
+  .form-group { margin-bottom: 20px; }
+  label {
+    display: block;
+    font-size: .82rem;
+    font-weight: 600;
+    color: #374151;
+    margin-bottom: 6px;
+  }
+  input[type="text"],
+  input[type="password"] {
+    width: 100%;
+    padding: 11px 14px;
+    border: 1.5px solid #d1d5db;
+    border-radius: 8px;
+    font-size: .95rem;
+    color: #111827;
+    transition: border-color .2s, box-shadow .2s;
+    outline: none;
+  }
+  input:focus {
+    border-color: #2d7a4f;
+    box-shadow: 0 0 0 3px rgba(45,122,79,.15);
+  }
+
+  .pw-wrap { position: relative; }
+  .pw-wrap input { padding-right: 42px; }
+  .toggle-pw {
+    position: absolute;
+    right: 12px; top: 50%;
+    transform: translateY(-50%);
+    background: none; border: none;
+    cursor: pointer; color: #9ca3af;
+    padding: 0; line-height: 1;
+  }
+  .toggle-pw:hover { color: #374151; }
+
+  .btn {
+    display: block;
+    width: 100%;
+    padding: 13px;
+    background: #2d7a4f;
+    color: #fff;
+    font-size: 1rem;
+    font-weight: 600;
+    border: none;
+    border-radius: 8px;
+    cursor: pointer;
+    transition: background .2s, transform .1s;
+    margin-top: 8px;
+  }
+  .btn:hover  { background: #1a4731; }
+  .btn:active { transform: scale(.98); }
+  .btn:disabled { background: #9ca3af; cursor: not-allowed; }
+
+  .alert {
+    padding: 12px 14px;
+    border-radius: 8px;
+    font-size: .88rem;
+    margin-bottom: 20px;
+    display: none;
+  }
+  .alert.error   { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
+  .alert.success { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
+  .alert.show    { display: block; }
+
+  .spinner {
+    display: inline-block;
+    width: 16px; height: 16px;
+    border: 2px solid rgba(255,255,255,.4);
+    border-top-color: #fff;
+    border-radius: 50%;
+    animation: spin .7s linear infinite;
+    vertical-align: middle;
+    margin-right: 6px;
+    display: none;
+  }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+
+<div class="card">
+  <div class="logo">
+    <!-- Leaf / plant icon -->
+    <svg viewBox="0 0 56 56" fill="none" xmlns="http://www.w3.org/2000/svg">
+      <circle cx="28" cy="28" r="28" fill="#f0fdf4"/>
+      <path d="M28 44V24" stroke="#2d7a4f" stroke-width="2.5" stroke-linecap="round"/>
+      <path d="M28 36c0 0-8-4-8-12 0 0 8 2 8 12z" fill="#4caf50"/>
+      <path d="M28 30c0 0 8-4 8-12 0 0-8 2-8 12z" fill="#2d7a4f"/>
+    </svg>
+    <h1>Agriculture<br>Information System</h1>
+    <p>Sign in to your account</p>
+  </div>
+
+  <div class="alert error" id="alertBox"></div>
+
+  <form id="loginForm" autocomplete="off" novalidate>
+    <div class="form-group">
+      <label for="username">Username</label>
+      <input type="text" id="username" name="username"
+             placeholder="Enter your username"
+             autocomplete="username" required>
+    </div>
+
+    <div class="form-group">
+      <label for="password">Password</label>
+      <div class="pw-wrap">
+        <input type="password" id="password" name="password"
+               placeholder="Enter your password"
+               autocomplete="current-password" required>
+        <button type="button" class="toggle-pw" id="togglePw" aria-label="Show/hide password">
+          <svg id="eyeIcon" xmlns="http://www.w3.org/2000/svg" width="20" height="20"
+               viewBox="0 0 24 24" fill="none" stroke="currentColor"
+               stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/>
+            <circle cx="12" cy="12" r="3"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <button type="submit" class="btn" id="submitBtn">
+      <span class="spinner" id="spinner"></span>
+      Sign In
+    </button>
+  </form>
+</div>
+
+<script>
+(function () {
+  const form      = document.getElementById('loginForm');
+  const alertBox  = document.getElementById('alertBox');
+  const submitBtn = document.getElementById('submitBtn');
+  const spinner   = document.getElementById('spinner');
+  const togglePw  = document.getElementById('togglePw');
+  const pwField   = document.getElementById('password');
+  const eyeIcon   = document.getElementById('eyeIcon');
+
+  // Eye-toggle
+  const eyeOpen  = `<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>`;
+  const eyeClosed = `<line x1="1" y1="1" x2="23" y2="23"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19m-6.72-1.07A3 3 0 0 1 9.07 9.07M6.53 6.53A10.72 10.72 0 0 0 1 12s4 8 11 8c2.17 0 4.17-.67 5.86-1.81"/>`;
+
+  togglePw.addEventListener('click', () => {
+    const isHidden = pwField.type === 'password';
+    pwField.type    = isHidden ? 'text' : 'password';
+    eyeIcon.innerHTML = isHidden ? eyeClosed : eyeOpen;
+  });
+
+  function showAlert(msg, type = 'error') {
+    alertBox.textContent = msg;
+    alertBox.className   = `alert ${type} show`;
+  }
+  function hideAlert() {
+    alertBox.className = 'alert';
+  }
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    hideAlert();
+
+    const username = document.getElementById('username').value.trim();
+    const password = pwField.value;
+
+    if (!username || !password) {
+      showAlert('Please enter both username and password.');
+      return;
+    }
+
+    submitBtn.disabled    = true;
+    spinner.style.display = 'inline-block';
+
+    try {
+      const res  = await fetch('login_handler.php', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+        body:    `username=${encodeURIComponent(username)}&password=${encodeURIComponent(password)}`,
+      });
+      const data = await res.json();
+
+      if (data.ok) {
+        window.location.href = data.redirect || 'index.php';
+      } else {
+        showAlert(data.error || 'Login failed. Please try again.');
+      }
+    } catch (err) {
+      showAlert('Network error. Please try again.');
+    } finally {
+      submitBtn.disabled    = false;
+      spinner.style.display = 'none';
+    }
+  });
+})();
+</script>
+</body>
+</html>
