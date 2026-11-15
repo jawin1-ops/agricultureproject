@@ -2,10 +2,10 @@
 
 // Read connection details from environment variables (set via Render dashboard).
 // Fallback values are intentionally left empty so a missing var fails loudly.
-$host     = getenv('DB_HOST') ?: 'db.saqltdvcpgentxyjhrsg.supabase.co';
+$host     = getenv('DB_HOST') ?: 'aws-0-ap-northeast-2.pooler.supabase.com';
 $port     = getenv('DB_PORT') ?: '5432';
 $dbname   = getenv('DB_NAME') ?: 'postgres';
-$user     = getenv('DB_USER') ?: 'postgres';
+$user     = getenv('DB_USER') ?: 'postgres.saqltdvcpgentxyjhrsg';
 $password = getenv('DB_PASS') ?: 'jawinhermosa1';
 
 try {
