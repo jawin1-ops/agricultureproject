@@ -1,37 +1,71 @@
 <?php
+declare(strict_types=1);
 
 /**
- * auth.php
- * Session management, role guard, and change-request helper.
- * Include this at the top of every protected page.
+ * includes/auth.php
+ * Session management, Role-Based Access Control (RBAC), and authentication helpers.
+ *
+ * Enforces active account checks (auto-logout if is_deleted = TRUE or deleted from DB).
+ * Tables: "system_user", user_role_lookup.
  */
 
-if (session_status() === PHP_SESSION_NONE) {
+require_once __DIR__ . '/../config/database.php';   // provides $pdo
+require_once __DIR__ . '/audit.php';
+
+if (!defined('ROLE_ADMIN'))      define('ROLE_ADMIN', 1);
+if (!defined('ROLE_STAFF'))      define('ROLE_STAFF', 2);
+if (!defined('AUTH_LOGIN_PAGE')) define('AUTH_LOGIN_PAGE', 'login.html');
+if (!defined('AUTH_HOME_PAGE'))  define('AUTH_HOME_PAGE', 'index.php');
+
+/* ─── Secure Session Bootstrap ────────────────────────────────────────── */
+
+function startSecureSession(): void
+{
+    if (session_status() !== PHP_SESSION_NONE) {
+        return;
+    }
+
+    $https = (!empty($_SERVER['HTTPS']) && $_SERVER['HTTPS'] !== 'off')
+          || (($_SERVER['HTTP_X_FORWARDED_PROTO'] ?? '') === 'https');
+
+    ini_set('session.use_strict_mode', '1');
+    ini_set('session.use_only_cookies', '1');
+
+    session_set_cookie_params([
+        'lifetime' => 0,
+        'path'     => '/',
+        'secure'   => $https,
+        'httponly' => true,
+        'samesite' => 'Lax',
+    ]);
     session_start();
 }
 
-require_once __DIR__ . '/../config/database.php';
+startSecureSession();
 
-/* ─── Constants ─────────────────────────────────────────── */
-define('ROLE_ADMIN', 1);
-define('ROLE_STAFF', 2);
+/* ─── Output Escaping Helper ─────────────────────────────────────────── */
 
-/* ─── Core helpers ───────────────────────────────────────── */
+/**
+ * htmlspecialchars wrapper for safe HTML output.
+ */
+function e(mixed $str): string
+{
+    return htmlspecialchars((string)($str ?? ''), ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+}
+
+/* ─── Session State & Role Helpers ───────────────────────────────────── */
 
 function isLoggedIn(): bool
 {
-    return isset($_SESSION['user_id']);
+    return isset($_SESSION['user_id']) && (int)$_SESSION['user_id'] > 0;
 }
 
-function currentUser(): ?array
+/**
+ * Current user ID, or null when unauthenticated.
+ */
+function currentUserId(): ?int
 {
-    if (!isLoggedIn()) return null;
-    return [
-        'user_id'   => $_SESSION['user_id'],
-        'username'  => $_SESSION['username'],
-        'role_id'   => $_SESSION['role_id'],
-        'role_name' => $_SESSION['role_name'],
-    ];
+    return isLoggedIn() ? (int)$_SESSION['user_id'] : null;
 }
 
 function currentRoleId(): int
@@ -39,55 +73,160 @@ function currentRoleId(): int
     return (int)($_SESSION['role_id'] ?? 0);
 }
 
-function isAdmin(): bool
+function currentUser(): ?array
 {
-    return currentRoleId() === ROLE_ADMIN;
+    if (!isLoggedIn()) {
+        return null;
+    }
+    return [
+        'user_id'   => (int)$_SESSION['user_id'],
+        'username'  => (string)($_SESSION['username'] ?? ''),
+        'full_name' => (string)($_SESSION['full_name'] ?? ''),
+        'role_id'   => currentRoleId(),
+        'role_name' => (string)($_SESSION['role_name'] ?? ''),
+    ];
 }
-
-function isStaff(): bool
-{
-    return currentRoleId() === ROLE_STAFF;
-}
-
-/* ─── Route guards ───────────────────────────────────────── */
 
 /**
- * Redirect to login if the user is not authenticated.
+ * Check if the authenticated user has Administrator privileges.
  */
-function requireLogin(string $loginPage = '/login.php'): void
+function isAdmin(): bool
+{
+    return isLoggedIn() && currentRoleId() === ROLE_ADMIN;
+}
+
+/**
+ * Check if the authenticated user is Staff.
+ */
+function isStaff(): bool
+{
+    return isLoggedIn() && currentRoleId() === ROLE_STAFF;
+}
+
+/* ─── Logout Helper ──────────────────────────────────────────────────── */
+
+function logout(): void
+{
+    $_SESSION = [];
+    if (ini_get('session.use_cookies')) {
+        $p = session_get_cookie_params();
+        setcookie(session_name(), '', [
+            'expires'  => time() - 42000,
+            'path'     => $p['path'],
+            'domain'   => $p['domain'],
+            'secure'   => $p['secure'],
+            'httponly' => $p['httponly'],
+            'samesite' => $p['samesite'] ?? 'Lax',
+        ]);
+    }
+    if (session_status() === PHP_SESSION_ACTIVE) {
+        session_destroy();
+    }
+}
+
+/* ─── Response & Access Redirection Helpers ───────────────────────────── */
+
+function wantsJson(): bool
+{
+    $accept = $_SERVER['HTTP_ACCEPT'] ?? '';
+    return (($_SERVER['HTTP_X_REQUESTED_WITH'] ?? '') === 'XMLHttpRequest')
+        || stripos($accept, 'application/json') !== false;
+}
+
+/**
+ * Terminate unauthorized access with JSON or header redirect.
+ */
+function denyAccess(int $status, string $location, string $message): never
+{
+    if (wantsJson()) {
+        http_response_code($status);
+        header('Content-Type: application/json');
+        echo json_encode(['ok' => false, 'error' => $message]);
+        exit;
+    }
+    header('Location: ' . $location);
+    exit;
+}
+
+/* ─── Per-Request Account Verification (Soft-Delete Check) ────────────── */
+
+/**
+ * Verifies that the currently logged-in user still exists in "system_user" and is_deleted = FALSE.
+ * Automatically terminates the session if deactivated or deleted.
+ */
+function verifyActiveSession(): void
+{
+    global $pdo;
+
+    if (!isLoggedIn() || !$pdo) {
+        return;
+    }
+
+    try {
+        $stmt = $pdo->prepare('
+            SELECT su.user_id, su.username, su.full_name, su.role_id, r.role_name
+            FROM   "system_user" su
+            LEFT JOIN user_role_lookup r ON r.role_id = su.role_id
+            WHERE  su.user_id = :id
+              AND  su.is_deleted = FALSE
+            LIMIT  1
+        ');
+        $stmt->execute([':id' => (int)$_SESSION['user_id']]);
+        $row = $stmt->fetch(PDO::FETCH_ASSOC);
+    } catch (Throwable $e) {
+        error_log('verifyActiveSession error: ' . $e->getMessage());
+        logout();
+        denyAccess(503, AUTH_LOGIN_PAGE . '?error=unavailable', 'Service temporarily unavailable.');
+    }
+
+    if (!$row) {
+        // Account has been soft-deleted or removed
+        logout();
+        denyAccess(401, AUTH_LOGIN_PAGE . '?error=deactivated', 'Your account has been deactivated or removed.');
+    }
+
+    // Refresh cached session attributes
+    $_SESSION['username']  = $row['username'];
+    $_SESSION['full_name'] = $row['full_name'];
+    $_SESSION['role_id']   = (int)$row['role_id'];
+    $_SESSION['role_name'] = (string)($row['role_name'] ?? '');
+}
+
+verifyActiveSession();
+
+/* ─── Route Guards ────────────────────────────────────────────────────── */
+
+function requireLogin(string $loginPage = AUTH_LOGIN_PAGE): void
 {
     if (!isLoggedIn()) {
         $redirect = urlencode($_SERVER['REQUEST_URI'] ?? '');
-        header("Location: {$loginPage}?redirect={$redirect}");
-        exit;
+        denyAccess(401, "{$loginPage}?redirect={$redirect}", 'Authentication required.');
     }
 }
 
 /**
- * Allow only Administrators; redirect others.
+ * Guard endpoint for Administrator access only.
  */
-function requireAdmin(string $fallback = '/index.php'): void
+function requireAdmin(string $fallback = AUTH_HOME_PAGE): void
 {
     requireLogin();
     if (!isAdmin()) {
-        header("Location: {$fallback}?error=access_denied");
-        exit;
+        denyAccess(403, "{$fallback}?error=access_denied", 'Administrator access required.');
     }
 }
 
 /**
- * Allow Administrators and Staff; redirect others.
+ * Guard endpoint for Staff or Administrator access.
  */
-function requireStaffOrAdmin(string $fallback = '/login.php'): void
+function requireStaffOrAdmin(string $fallback = AUTH_LOGIN_PAGE): void
 {
     requireLogin();
-    if (currentRoleId() !== ROLE_ADMIN && currentRoleId() !== ROLE_STAFF) {
-        header("Location: {$fallback}?error=access_denied");
-        exit;
+    if (!isAdmin() && !isStaff()) {
+        denyAccess(403, "{$fallback}?error=access_denied", 'Access denied.');
     }
 }
 
-/* ─── Password helpers ───────────────────────────────────── */
+/* ─── Password Cryptography Helpers ───────────────────────────────────── */
 
 function hashPassword(string $plain): string
 {
@@ -96,125 +235,63 @@ function hashPassword(string $plain): string
 
 function verifyPassword(string $plain, string $hash): bool
 {
-    return password_verify($plain, $hash);
+    return $hash !== '' && password_verify($plain, $hash);
 }
 
-/* ─── Login / Logout ─────────────────────────────────────── */
+/* ─── Authentication Handlers ─────────────────────────────────────────── */
 
 /**
- * Attempt login; returns ['ok'=>true] or ['ok'=>false,'error'=>'...'].
+ * Attempt login against "system_user". Soft-deleted accounts (is_deleted = TRUE) cannot log in.
+ *
+ * @return array{ok: bool, error?: string}
  */
 function attemptLogin(string $username, string $plain): array
 {
     global $pdo;
 
-    $stmt = $pdo->prepare("
-        SELECT su.user_id, su.username, su.password_hash,
+    $generic = ['ok' => false, 'error' => 'Invalid username or password.'];
+
+    $stmt = $pdo->prepare('
+        SELECT su.user_id, su.username, su.full_name, su.password_hash,
                su.role_id, r.role_name
-        FROM   app_users su
-        JOIN   roles r ON r.role_id = su.role_id
+        FROM   "system_user" su
+        JOIN   user_role_lookup r ON r.role_id = su.role_id
         WHERE  su.username = :username
+          AND  su.is_deleted = FALSE
         LIMIT  1
-    ");
+    ');
     $stmt->execute([':username' => trim($username)]);
-    $row = $stmt->fetch();
+    $row = $stmt->fetch(PDO::FETCH_ASSOC);
 
     if (!$row) {
-        return ['ok' => false, 'error' => 'Invalid username or password.'];
+        // Prevent username enumeration by simulating work
+        password_verify($plain, '$2y$12$usesomesillystringforsaleuxJ4yH2mQ3qVv1p1m0l5x8x6C1nJ0b6e');
+        return $generic;
     }
 
-    if (!verifyPassword($plain, $row['password_hash'])) {
-        return ['ok' => false, 'error' => 'Invalid username or password.'];
+    if (!verifyPassword($plain, (string)$row['password_hash'])) {
+        return $generic;
     }
 
-    // Regenerate session ID to prevent fixation
-    session_regenerate_id(true);
+    session_regenerate_id(true); // Prevent session fixation
 
-    $_SESSION['user_id']   = $row['user_id'];
+    $_SESSION['user_id']   = (int)$row['user_id'];
     $_SESSION['username']  = $row['username'];
+    $_SESSION['full_name'] = $row['full_name'];
     $_SESSION['role_id']   = (int)$row['role_id'];
-    $_SESSION['role_name'] = $row['role_name'];
+    $_SESSION['role_name'] = (string)$row['role_name'];
+
+    try {
+        logActivity(
+            $pdo,
+            'LOGIN',
+            'system_user',
+            (int)$row['user_id'],
+            "User '{$row['username']}' logged in successfully"
+        );
+    } catch (Throwable $e) {
+        error_log('LOGIN activity log failed: ' . $e->getMessage());
+    }
 
     return ['ok' => true];
-}
-
-function logout(): void
-{
-    $_SESSION = [];
-    if (ini_get('session.use_cookies')) {
-        $p = session_get_cookie_params();
-        setcookie(
-            session_name(), '', time() - 42000,
-            $p['path'], $p['domain'], $p['secure'], $p['httponly']
-        );
-    }
-    session_destroy();
-}
-
-/* ─── RBAC action helper ─────────────────────────────────── */
-
-/**
- * submitOrRequestChange()
- *
- * Admin  → executes the callback $directAction immediately.
- * Staff  → inserts a row into change_requests and returns a pending message.
- *
- * @param string   $actionType   'UPDATE' | 'DELETE'
- * @param string   $targetTable  e.g. 'farmer', 'farm', 'crop', 'planting', 'harvest'
- * @param int      $recordId     Primary key of the target row
- * @param array    $proposedData Key-value pairs of the proposed change (for UPDATE).
- *                               Pass [] for DELETE.
- * @param callable $directAction Closure executed directly for Admins.
- *                               Signature: function(): void
- *
- * @return array ['ok'=>bool, 'message'=>string, 'pending'=>bool]
- */
-function submitOrRequestChange(
-    string   $actionType,
-    string   $targetTable,
-    int      $recordId,
-    array    $proposedData,
-    callable $directAction
-): array {
-    global $pdo;
-
-    if (isAdmin()) {
-        try {
-            $directAction();
-            return [
-                'ok'      => true,
-                'pending' => false,
-                'message' => strtoupper($actionType) . ' applied successfully.',
-            ];
-        } catch (Throwable $e) {
-            return ['ok' => false, 'pending' => false, 'message' => 'Error: ' . $e->getMessage()];
-        }
-    }
-
-    if (isStaff()) {
-        try {
-            $stmt = $pdo->prepare("
-                INSERT INTO change_requests
-                    (action_type, target_table, record_id, proposed_data, status, requested_by, requested_at)
-                VALUES
-                    (:action_type, :target_table, :record_id, :proposed_data, 'PENDING', :requested_by, NOW())
-            ");
-            $stmt->execute([
-                ':action_type'   => strtoupper($actionType),
-                ':target_table'  => $targetTable,
-                ':record_id'     => $recordId,
-                ':proposed_data' => json_encode($proposedData),
-                ':requested_by'  => $_SESSION['user_id'],
-            ]);
-            return [
-                'ok'      => true,
-                'pending' => true,
-                'message' => 'Request submitted for Admin approval.',
-            ];
-        } catch (Throwable $e) {
-            return ['ok' => false, 'pending' => false, 'message' => 'Error: ' . $e->getMessage()];
-        }
-    }
-
-    return ['ok' => false, 'pending' => false, 'message' => 'Unauthorized.'];
 }

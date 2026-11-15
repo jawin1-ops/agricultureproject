@@ -1,389 +1,541 @@
 <?php
+declare(strict_types=1);
+
+/**
+ * plantings.php
+ * Leafty - Planting Cycles Management (Operational Module)
+ * Multi-table JOINs, date checks, soft delete guarded via canSoftDelete() & audited via logActivity()
+ */
+
+$pageTitle = 'Plantings - Leafty';
+require_once __DIR__ . '/config/database.php';
 require_once __DIR__ . '/includes/auth.php';
-requireLogin('login.html');
+requireLogin();
 
-$user   = currentUser();
-$roleId = currentRoleId();
+require_once __DIR__ . '/includes/soft_delete_guard.php';
 
-/* ─── POST HANDLERS ─────────────────────────────────────────────────── */
+$currentUserId = (int)currentUserId();
+$msg = '';
+$msgType = 'info';
+
+if (isset($_GET['updated'])) {
+    $msg = $_SESSION['flash_msg'] ?? 'Planting cycle updated successfully.';
+    $msgType = $_SESSION['flash_type'] ?? 'success';
+    unset($_SESSION['flash_msg'], $_SESSION['flash_type']);
+} elseif (isset($_GET['created'])) {
+    $msg = $_SESSION['flash_msg'] ?? 'Planting cycle recorded successfully.';
+    $msgType = $_SESSION['flash_type'] ?? 'success';
+    unset($_SESSION['flash_msg'], $_SESSION['flash_type']);
+} elseif (isset($_GET['deleted'])) {
+    $msg = $_SESSION['flash_msg'] ?? 'Planting cycle deactivated successfully.';
+    $msgType = $_SESSION['flash_type'] ?? 'success';
+    unset($_SESSION['flash_msg'], $_SESSION['flash_type']);
+} elseif (isset($_SESSION['flash_msg'])) {
+    $msg = $_SESSION['flash_msg'];
+    $msgType = $_SESSION['flash_type'] ?? 'info';
+    unset($_SESSION['flash_msg'], $_SESSION['flash_type']);
+}
+
+// Handle POST actions (Create, Update, Soft Delete)
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['action'] ?? '';
 
-    if ($action === 'add') {
-        $stmt = $pdo->prepare('
-            INSERT INTO "plantings"
-                ("farm_id","crop_id","planting_date","expected_harvest_date",
-                 "area_planted_hectares","status_id",
-                 "created_by","updated_by","created_at","updated_at")
-            VALUES
-                (:farm_id,:crop_id,:planting_date,:expected_harvest_date,
-                 :area,:status_id,
-                 :created_by,:updated_by,NOW(),NOW())
-        ');
-        $stmt->execute([
-            ':farm_id'               => (int)$_POST['farm_id'],
-            ':crop_id'               => (int)$_POST['crop_id'],
-            ':planting_date'         => $_POST['planting_date'],
-            ':expected_harvest_date' => $_POST['expected_harvest_date'] ?: null,
-            ':area'                  => (float)$_POST['area_planted_hectares'],
-            ':status_id'             => (int)$_POST['status_id'],
-            ':created_by'            => $user['user_id'],
-            ':updated_by'            => $user['user_id'],
-        ]);
-        header('Location: plantings.php?msg=Planting+added+successfully.');
-        exit;
+    // 1. ADD PLANTING
+    if ($action === 'create') {
+        $farmId       = (int)($_POST['farm_id'] ?? 0);
+        $cropId       = (int)($_POST['crop_id'] ?? 0);
+        $plantingDate = trim((string)($_POST['planting_date'] ?? date('Y-m-d')));
+        $areaPlanted  = (float)($_POST['area_planted_hectares'] ?? 0);
+        $seedQty      = (float)($_POST['seed_quantity_kg'] ?? 0);
+        $expectedDate = trim((string)($_POST['expected_harvest_date'] ?? ''));
+        $statusId     = (int)($_POST['status_id'] ?? 1); // Default: 1 (Planted)
+
+        if ($farmId <= 0 || $cropId <= 0 || $plantingDate === '') {
+            $msg = 'Farm, Crop, and Planting Date are required.';
+            $msgType = 'error';
+        } elseif ($expectedDate !== '' && strtotime($expectedDate) <= strtotime($plantingDate)) {
+            $msg = 'Expected Harvest Date must be strictly after the Planting Date.';
+            $msgType = 'error';
+        } else {
+            try {
+                $pdo->beginTransaction();
+                $stmt = $pdo->prepare("
+                    INSERT INTO plantings
+                        (farm_id, crop_id, planting_date, area_planted_hectares, seed_quantity_kg,
+                         expected_harvest_date, status_id, is_deleted, created_at, updated_at, created_by, updated_by)
+                    VALUES
+                        (:farm_id, :crop_id, :p_date, :area, :seeds, :exp_date, :status_id,
+                         FALSE, NOW(), NOW(), :created_by, :updated_by)
+                    RETURNING planting_id
+                ");
+                $stmt->execute([
+                    ':farm_id'     => $farmId,
+                    ':crop_id'     => $cropId,
+                    ':p_date'      => $plantingDate,
+                    ':area'        => $areaPlanted > 0 ? $areaPlanted : null,
+                    ':seeds'       => $seedQty > 0 ? $seedQty : null,
+                    ':exp_date'    => $expectedDate ?: null,
+                    ':status_id'   => $statusId,
+                    ':created_by'  => $currentUserId,
+                    ':updated_by'  => $currentUserId,
+                ]);
+                $newPlantingId = (int)$stmt->fetchColumn();
+
+                $newData = [
+                    'planting_id'           => $newPlantingId,
+                    'farm_id'               => $farmId,
+                    'crop_id'               => $cropId,
+                    'planting_date'         => $plantingDate,
+                    'area_planted_hectares' => $areaPlanted,
+                    'seed_quantity_kg'      => $seedQty,
+                    'expected_harvest_date' => $expectedDate,
+                    'status_id'             => $statusId,
+                ];
+
+                logActivity($pdo, 'CREATE', 'plantings', $newPlantingId, "Recorded new planting cycle #{$newPlantingId}", null, $newData);
+                $pdo->commit();
+
+                $_SESSION['flash_msg'] = "Planting cycle #{$newPlantingId} recorded successfully.";
+                $_SESSION['flash_type'] = 'success';
+                header('Location: plantings.php?created=1');
+                exit;
+            } catch (Throwable $e) {
+                if ($pdo->inTransaction()) $pdo->rollBack();
+                error_log('Planting creation failed: ' . $e->getMessage());
+                $msg = 'Failed to create planting: ' . $e->getMessage();
+                $msgType = 'error';
+            }
+        }
     }
 
-    if ($action === 'edit') {
-        $planting_id   = (int)$_POST['planting_id'];
-        $proposed_data = [
-            'farm_id'               => (int)$_POST['farm_id'],
-            'crop_id'               => (int)$_POST['crop_id'],
-            'planting_date'         => $_POST['planting_date'],
-            'expected_harvest_date' => $_POST['expected_harvest_date'] ?: null,
-            'area_planted_hectares' => (float)$_POST['area_planted_hectares'],
-            'status_id'             => (int)$_POST['status_id'],
-            'updated_by'            => $user['user_id'],
-        ];
+    // 2. UPDATE PLANTING
+    elseif ($action === 'update') {
+        $plantingId   = (int)($_POST['planting_id'] ?? 0);
+        $farmId       = (int)($_POST['farm_id'] ?? 0);
+        $cropId       = (int)($_POST['crop_id'] ?? 0);
+        $plantingDate = trim((string)($_POST['planting_date'] ?? date('Y-m-d')));
+        $areaPlanted  = (float)($_POST['area_planted_hectares'] ?? 0);
+        $seedQty      = (float)($_POST['seed_quantity_kg'] ?? 0);
+        $expectedDate = trim((string)($_POST['expected_harvest_date'] ?? ''));
+        $statusId     = (int)($_POST['status_id'] ?? 1);
 
-        if (isAdmin()) {
-            $stmt = $pdo->prepare('
-                UPDATE "plantings"
-                SET "farm_id"=:farm_id,
-                    "crop_id"=:crop_id,
-                    "planting_date"=:planting_date,
-                    "expected_harvest_date"=:expected_harvest_date,
-                    "area_planted_hectares"=:area,
-                    "status_id"=:status_id,
-                    "updated_by"=:updated_by,
-                    "updated_at"=NOW()
-                WHERE "planting_id"=:planting_id
-            ');
-            $stmt->execute([
-                ':farm_id'               => $proposed_data['farm_id'],
-                ':crop_id'               => $proposed_data['crop_id'],
-                ':planting_date'         => $proposed_data['planting_date'],
-                ':expected_harvest_date' => $proposed_data['expected_harvest_date'],
-                ':area'                  => $proposed_data['area_planted_hectares'],
-                ':status_id'             => $proposed_data['status_id'],
-                ':updated_by'            => $proposed_data['updated_by'],
-                ':planting_id'           => $planting_id,
-            ]);
-            header('Location: plantings.php?msg=Planting+updated+successfully.');
+        if ($plantingId <= 0 || $farmId <= 0 || $cropId <= 0 || $plantingDate === '') {
+            $msg = 'Valid planting ID, Farm, Crop, and Planting Date are required.';
+            $msgType = 'error';
+        } elseif ($expectedDate !== '' && strtotime($expectedDate) <= strtotime($plantingDate)) {
+            $msg = 'Expected Harvest Date must be strictly after the Planting Date.';
+            $msgType = 'error';
         } else {
-            submitOrRequestChange('UPDATE', 'plantings', $planting_id, $proposed_data, function() {});
-            header('Location: plantings.php?msg=Request+submitted+for+Admin+approval.');
+            try {
+                $cur = $pdo->prepare("SELECT * FROM plantings WHERE planting_id = :id AND is_deleted = FALSE");
+                $cur->execute([':id' => $plantingId]);
+                $oldRow = $cur->fetch(PDO::FETCH_ASSOC);
+
+                if (!$oldRow) {
+                    $msg = 'Planting record not found or already deleted.';
+                    $msgType = 'error';
+                } else {
+                    $pdo->beginTransaction();
+                    $stmt = $pdo->prepare("
+                        UPDATE plantings
+                        SET farm_id = :farm_id,
+                            crop_id = :crop_id,
+                            planting_date = :p_date,
+                            area_planted_hectares = :area,
+                            seed_quantity_kg = :seeds,
+                            expected_harvest_date = :exp_date,
+                            status_id = :status_id,
+                            updated_at = NOW(),
+                            updated_by = :updated_by
+                        WHERE planting_id = :id
+                    ");
+                    $stmt->execute([
+                        ':farm_id'     => $farmId,
+                        ':crop_id'     => $cropId,
+                        ':p_date'      => $plantingDate,
+                        ':area'        => $areaPlanted > 0 ? $areaPlanted : null,
+                        ':seeds'       => $seedQty > 0 ? $seedQty : null,
+                        ':exp_date'    => $expectedDate ?: null,
+                        ':status_id'   => $statusId,
+                        ':updated_by'  => $currentUserId,
+                        ':id'          => $plantingId,
+                    ]);
+
+                    // Bug Fix #1: When status is set to Harvested (3), auto-insert a default
+                    // harvest record if none already exists for this planting_id.
+                    if ($statusId === 3) {
+                        $existsStmt = $pdo->prepare("
+                            SELECT COUNT(*) FROM harvests
+                            WHERE planting_id = :planting_id AND COALESCE(is_deleted, FALSE) = FALSE
+                        ");
+                        $existsStmt->execute([':planting_id' => $plantingId]);
+                        $harvestExists = (int)$existsStmt->fetchColumn();
+
+                        if ($harvestExists === 0) {
+                            // Resolve the first available grade_id (Grade A) and a default remark_id
+                            $gradeStmt = $pdo->query("
+                                SELECT grade_id FROM quality_grades
+                                WHERE COALESCE(is_deleted, FALSE) = FALSE
+                                ORDER BY grade_id ASC LIMIT 1
+                            ");
+                            $defaultGradeId = $gradeStmt ? $gradeStmt->fetchColumn() : null;
+                            $defaultGradeId = $defaultGradeId ?: null;
+
+                            $remarkStmt = $pdo->query("
+                                SELECT remark_id FROM harvest_remarks
+                                WHERE COALESCE(is_deleted, FALSE) = FALSE
+                                  AND LOWER(description) LIKE '%auto%'
+                                ORDER BY remark_id ASC LIMIT 1
+                            ");
+                            $defaultRemarkId = $remarkStmt ? $remarkStmt->fetchColumn() : null;
+                            $defaultRemarkId = $defaultRemarkId ?: null;
+
+                            $insHarvest = $pdo->prepare("
+                                INSERT INTO harvests
+                                    (planting_id, harvest_date, quantity_kg, selling_price_per_kg,
+                                     grade_id, remark_id, is_deleted, created_at, updated_at,
+                                     created_by, updated_by)
+                                VALUES
+                                    (:planting_id, CURRENT_DATE, 0, 0,
+                                     :grade_id, :remark_id, FALSE, NOW(), NOW(),
+                                     :created_by, :updated_by)
+                            ");
+                            $insHarvest->execute([
+                                ':planting_id' => $plantingId,
+                                ':grade_id'    => $defaultGradeId,
+                                ':remark_id'   => $defaultRemarkId,
+                                ':created_by'  => $currentUserId,
+                                ':updated_by'  => $currentUserId,
+                            ]);
+                        }
+                    }
+
+                    $newData = [
+                        'farm_id'               => $farmId,
+                        'crop_id'               => $cropId,
+                        'planting_date'         => $plantingDate,
+                        'area_planted_hectares' => $areaPlanted,
+                        'seed_quantity_kg'      => $seedQty,
+                        'expected_harvest_date' => $expectedDate,
+                        'status_id'             => $statusId,
+                    ];
+
+                    logActivity($pdo, 'UPDATE', 'plantings', $plantingId, "Updated planting cycle #{$plantingId}", $oldRow, $newData);
+                    $pdo->commit();
+
+                    $_SESSION['flash_msg'] = "Planting cycle #{$plantingId} updated successfully.";
+                    $_SESSION['flash_type'] = 'success';
+                    header('Location: plantings.php?updated=1');
+                    exit;
+                }
+            } catch (Throwable $e) {
+                if ($pdo->inTransaction()) $pdo->rollBack();
+                error_log('Planting update failed: ' . $e->getMessage());
+                $msg = 'Failed to update planting: ' . $e->getMessage();
+                $msgType = 'error';
+            }
         }
-        exit;
     }
 
-    if ($action === 'delete') {
-        $planting_id = (int)$_POST['planting_id'];
-
-        if (isAdmin()) {
-            $stmt = $pdo->prepare('DELETE FROM "plantings" WHERE "planting_id"=:id');
-            $stmt->execute([':id' => $planting_id]);
-            header('Location: plantings.php?msg=Planting+deleted.');
+    // 3. SOFT DELETE PLANTING (Admin Only)
+    elseif ($action === 'soft_delete') {
+        if (!isAdmin()) {
+            $msg = 'Only Administrators have permission to delete records.';
+            $msgType = 'error';
         } else {
-            submitOrRequestChange('DELETE', 'plantings', $planting_id, [], function() {});
-            header('Location: plantings.php?msg=Delete+request+submitted+for+Admin+approval.');
+            $plantingId = (int)($_POST['planting_id'] ?? 0);
+
+            $guard = canSoftDelete($pdo, 'plantings', $plantingId);
+            if (!$guard['allowed']) {
+                $msg = $guard['message'];
+                $msgType = 'error';
+            } else {
+                try {
+                    $cur = $pdo->prepare("SELECT * FROM plantings WHERE planting_id = :id");
+                    $cur->execute([':id' => $plantingId]);
+                    $oldRow = $cur->fetch(PDO::FETCH_ASSOC);
+
+                    $pdo->beginTransaction();
+                    $stmt = $pdo->prepare("UPDATE plantings SET is_deleted = TRUE, updated_at = NOW(), updated_by = :updated_by WHERE planting_id = :id");
+                    $stmt->execute([
+                        ':updated_by' => $currentUserId,
+                        ':id'         => $plantingId,
+                    ]);
+
+                    logActivity($pdo, 'SOFT_DELETE', 'plantings', $plantingId, "Soft-deleted planting #{$plantingId}", $oldRow);
+                    $pdo->commit();
+
+                    $_SESSION['flash_msg'] = "Planting #{$plantingId} deactivated successfully.";
+                    $_SESSION['flash_type'] = 'success';
+                    header('Location: plantings.php?deleted=1');
+                    exit;
+                } catch (Throwable $e) {
+                    if ($pdo->inTransaction()) $pdo->rollBack();
+                    error_log('Planting delete failed: ' . $e->getMessage());
+                    $msg = 'Failed to delete planting: ' . $e->getMessage();
+                    $msgType = 'error';
+                }
+            }
         }
-        exit;
     }
 }
 
-/* ─── FETCH DATA ────────────────────────────────────────────────────── */
-$plantings = $pdo->query('
-    SELECT p."planting_id", fm."farm_name", cr."crop_name",
-           p."planting_date", p."expected_harvest_date",
-           p."area_planted_hectares", ps."description" AS status,
-           p."created_at"
-    FROM "plantings" p
-    LEFT JOIN "farms" fm ON fm."farm_id" = p."farm_id"
-    LEFT JOIN "crops" cr ON cr."crop_id" = p."crop_id"
-    LEFT JOIN "planting_statuses" ps ON ps."status_id" = p."status_id"
-    ORDER BY p."planting_id" DESC
-')->fetchAll(PDO::FETCH_ASSOC);
+require_once __DIR__ . '/includes/header.php';
 
-$farms = $pdo->query('
-    SELECT "farm_id", "farm_name" FROM "farms" ORDER BY "farm_name" ASC
-')->fetchAll(PDO::FETCH_ASSOC);
+// Fetch active lookup options for dropdowns
+$activeFarms = $pdo->query("
+    SELECT fm.farm_id, fm.farm_name, f.last_name, f.first_name
+    FROM farms fm
+    JOIN farmers f ON f.farmer_id = fm.farmer_id
+    WHERE fm.is_deleted = FALSE AND f.is_deleted = FALSE
+    ORDER BY fm.farm_name ASC
+")->fetchAll(PDO::FETCH_ASSOC);
 
-$crops = $pdo->query('
-    SELECT "crop_id", "crop_name" FROM "crops" ORDER BY "crop_name" ASC
-')->fetchAll(PDO::FETCH_ASSOC);
+$activeCrops = $pdo->query("
+    SELECT crop_id, crop_name, variety, growing_days
+    FROM crops
+    WHERE is_deleted = FALSE
+    ORDER BY crop_name ASC
+")->fetchAll(PDO::FETCH_ASSOC);
 
-$statuses = $pdo->query('
-    SELECT "status_id", "description" FROM "planting_statuses" ORDER BY "description" ASC
-')->fetchAll(PDO::FETCH_ASSOC);
+$activeStatuses = $pdo->query("
+    SELECT status_id, description
+    FROM planting_status
+    WHERE is_deleted = FALSE
+    ORDER BY status_id ASC
+")->fetchAll(PDO::FETCH_ASSOC);
 
-/* also fetch planting rows with IDs for edit modal */
-$plantings_full = $pdo->query('
-    SELECT p."planting_id", p."farm_id", p."crop_id",
-           p."planting_date", p."expected_harvest_date",
-           p."area_planted_hectares", p."status_id"
-    FROM "plantings" p
-    ORDER BY p."planting_id" DESC
-')->fetchAll(PDO::FETCH_ASSOC);
-$plantings_map = [];
-foreach ($plantings_full as $row) {
-    $plantings_map[$row['planting_id']] = $row;
+// Search, Filters & Pagination
+$search       = trim((string)($_GET['search'] ?? ''));
+$filterStatus = (int)($_GET['status_id'] ?? 0);
+$filterCrop   = (int)($_GET['crop_id'] ?? 0);
+$page         = max(1, (int)($_GET['page'] ?? 1));
+$perPage      = 15;
+$offset       = ($page - 1) * $perPage;
+
+$whereClauses = ["p.is_deleted = FALSE"];
+$params       = [];
+
+if ($search !== '') {
+    $whereClauses[] = "(fm.farm_name ILIKE :s OR c.crop_name ILIKE :s OR f.first_name ILIKE :s OR f.last_name ILIKE :s)";
+    $params[':s'] = "%{$search}%";
 }
+if ($filterStatus > 0) {
+    $whereClauses[] = "p.status_id = :status";
+    $params[':status'] = $filterStatus;
+}
+if ($filterCrop > 0) {
+    $whereClauses[] = "p.crop_id = :crop";
+    $params[':crop'] = $filterCrop;
+}
+$whereSql = 'WHERE ' . implode(' AND ', $whereClauses);
 
-$flashMsg = htmlspecialchars($_GET['msg'] ?? '', ENT_QUOTES);
+// Count
+$countStmt = $pdo->prepare("
+    SELECT COUNT(*)
+    FROM plantings p
+    JOIN farms fm ON fm.farm_id = p.farm_id
+    JOIN farmers f ON f.farmer_id = fm.farmer_id
+    JOIN crops c ON c.crop_id = p.crop_id
+    {$whereSql}
+");
+$countStmt->execute($params);
+$totalRecords = (int)$countStmt->fetchColumn();
+$totalPages = max(1, (int)ceil($totalRecords / $perPage));
+
+// Fetch Records with multi-table JOIN
+$query = "
+    SELECT p.planting_id, p.farm_id, p.crop_id, p.planting_date,
+           p.area_planted_hectares, p.seed_quantity_kg, p.expected_harvest_date,
+           p.status_id, p.created_at,
+           fm.farm_name,
+           f.first_name AS farmer_first_name, f.last_name AS farmer_last_name,
+           c.crop_name, c.variety, c.growing_days,
+           ps.description AS status_name,
+           COALESCE(hv.harvest_count, 0) AS harvest_count,
+           COALESCE(hv.total_harvested_kg, 0) AS total_harvested_kg
+    FROM plantings p
+    JOIN farms fm ON fm.farm_id = p.farm_id
+    JOIN farmers f ON f.farmer_id = fm.farmer_id
+    JOIN crops c ON c.crop_id = p.crop_id
+    LEFT JOIN planting_status ps ON ps.status_id = p.status_id
+    LEFT JOIN (
+        SELECT planting_id, COUNT(*) AS harvest_count, SUM(quantity_kg) AS total_harvested_kg
+        FROM harvests
+        WHERE is_deleted = FALSE
+        GROUP BY planting_id
+    ) hv ON hv.planting_id = p.planting_id
+    {$whereSql}
+    ORDER BY p.planting_date DESC, p.planting_id DESC
+    LIMIT {$perPage} OFFSET {$offset}
+";
+$stmt = $pdo->prepare($query);
+$stmt->execute($params);
+$plantings = $stmt->fetchAll(PDO::FETCH_ASSOC);
 ?>
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width,initial-scale=1">
-<title>Plantings | AgriSystem</title>
-<style>
-*,*::before,*::after{box-sizing:border-box;margin:0;padding:0}
-body{font-family:'Segoe UI',system-ui,sans-serif;background:#f3f4f6;min-height:100vh}
 
-/* ── NAVBAR ── */
-.navbar{
-  position:sticky;top:0;z-index:100;
-  background:linear-gradient(90deg,#1a4731,#2d7a4f);
-  color:#fff;display:flex;align-items:center;
-  padding:0 1.5rem;height:56px;gap:1rem;
-  box-shadow:0 2px 8px rgba(0,0,0,.25)
-}
-.navbar-brand{display:flex;align-items:center;gap:.5rem;font-weight:700;font-size:1.1rem;text-decoration:none;color:#fff}
-.navbar-brand svg{flex-shrink:0}
-.nav-links{display:flex;gap:.25rem;flex:1;margin-left:.75rem}
-.nav-links a{
-  color:rgba(255,255,255,.85);text-decoration:none;
-  padding:.35rem .75rem;border-radius:6px;font-size:.9rem;
-  transition:background .15s
-}
-.nav-links a:hover{background:rgba(255,255,255,.12)}
-.nav-links a.active{background:rgba(255,255,255,.2);font-weight:600;color:#fff}
-.user-area{display:flex;align-items:center;gap:.6rem;margin-left:auto}
-.role-badge{
-  font-size:.7rem;font-weight:700;padding:.2rem .5rem;border-radius:20px;
-  background:rgba(255,255,255,.18);color:#fff;text-transform:uppercase;letter-spacing:.04em
-}
-.logout-btn{
-  background:rgba(255,255,255,.15);border:1px solid rgba(255,255,255,.3);
-  color:#fff;padding:.3rem .75rem;border-radius:6px;cursor:pointer;
-  font-size:.85rem;transition:background .15s
-}
-.logout-btn:hover{background:rgba(255,255,255,.25)}
+<div class="page-header">
+  <div class="page-header-title">
+    <h1>Plantings</h1>
+    <span class="page-header-subtitle">Field cultivation records, seed distributions, target maturation timelines, and harvest readiness</span>
+  </div>
+  <div class="page-header-actions">
+    <button type="button" class="btn btn-primary" onclick="openCreatePlantingModal()">
+      + Record New Planting
+    </button>
+  </div>
+</div>
 
-/* ── PAGE ── */
-.page{max-width:1140px;margin:2rem auto;padding:0 1rem}
-.page-header{display:flex;align-items:center;gap:1rem;margin-bottom:1.5rem;flex-wrap:wrap}
-.page-title{font-size:1.6rem;font-weight:700;color:#1a4731}
-.back-link{font-size:.85rem;color:#2d7a4f;text-decoration:none;display:flex;align-items:center;gap:.3rem}
-.back-link:hover{text-decoration:underline}
+<?php if ($msg !== ''): ?>
+<div class="card" style="border-left:4px solid <?= $msgType === 'success' ? 'var(--success)' : 'var(--danger)' ?>; padding:0.9rem 1.25rem;">
+  <strong style="color:<?= $msgType === 'success' ? 'var(--success)' : 'var(--danger)' ?>;">
+    <?= $msgType === 'success' ? '✓ ' : '⚠ ' ?><?= e($msg) ?>
+  </strong>
+</div>
+<?php endif; ?>
 
-/* ── FLASH ── */
-.flash{
-  padding:.85rem 1.2rem;border-radius:8px;margin-bottom:1.25rem;
-  background:#d1fae5;color:#065f46;border:1px solid #6ee7b7;
-  display:flex;justify-content:space-between;align-items:center
-}
-.flash-close{background:none;border:none;cursor:pointer;font-size:1.1rem;color:#065f46}
+<!-- Filter Toolbar -->
+<div class="toolbar">
+  <form method="GET" action="plantings.php" data-pjax class="toolbar-group" style="flex:1;">
+    <div class="search-box">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input type="text" name="search" placeholder="Search by farm, crop, farmer..." value="<?= e($search) ?>">
+    </div>
 
-/* ── TOOLBAR ── */
-.toolbar{display:flex;justify-content:flex-end;margin-bottom:1rem}
-.btn-primary{
-  background:#2d7a4f;color:#fff;border:none;padding:.55rem 1.2rem;
-  border-radius:7px;cursor:pointer;font-size:.9rem;font-weight:600;
-  transition:background .15s
-}
-.btn-primary:hover{background:#1a4731}
+    <select name="status_id" class="form-control" style="width:auto; min-width:140px;" data-no-enhance onchange="this.form.submit()">
+      <option value="">-- All Statuses --</option>
+      <?php foreach ($activeStatuses as $st): ?>
+      <option value="<?= (int)$st['status_id'] ?>" <?= $filterStatus === (int)$st['status_id'] ? 'selected' : '' ?>>
+        <?= e($st['description']) ?>
+      </option>
+      <?php endforeach; ?>
+    </select>
 
-/* ── CARD / TABLE ── */
-.card{background:#fff;border-radius:12px;box-shadow:0 1px 4px rgba(0,0,0,.08);overflow:hidden}
-table{width:100%;border-collapse:collapse;font-size:.88rem}
-thead th{
-  background:#f0fdf4;color:#1a4731;font-weight:700;
-  padding:.7rem 1rem;text-align:left;border-bottom:2px solid #d1fae5;white-space:nowrap
-}
-tbody tr{transition:background .1s}
-tbody tr:hover{background:#f9fafb}
-tbody td{padding:.7rem 1rem;border-bottom:1px solid #f0f0f0;vertical-align:middle}
-tbody tr:last-child td{border-bottom:none}
-.empty-row td{text-align:center;color:#9ca3af;padding:2.5rem}
+    <select name="crop_id" class="form-control" style="width:auto; min-width:140px;" data-no-enhance onchange="this.form.submit()">
+      <option value="">-- All Crops --</option>
+      <?php foreach ($activeCrops as $cp): ?>
+      <option value="<?= (int)$cp['crop_id'] ?>" <?= $filterCrop === (int)$cp['crop_id'] ? 'selected' : '' ?>>
+        <?= e($cp['crop_name']) ?>
+      </option>
+      <?php endforeach; ?>
+    </select>
 
-/* ── STATUS BADGE ── */
-.badge{
-  display:inline-block;padding:.22rem .6rem;border-radius:20px;
-  font-size:.75rem;font-weight:600;text-transform:capitalize
-}
-.badge-green{background:#d1fae5;color:#065f46}
-.badge-blue{background:#dbeafe;color:#1e40af}
-.badge-red{background:#fee2e2;color:#991b1b}
-.badge-gray{background:#f3f4f6;color:#6b7280}
-
-/* ── ACTION BUTTONS ── */
-.btn-edit{
-  background:#eff6ff;color:#1d4ed8;border:1px solid #bfdbfe;
-  padding:.3rem .7rem;border-radius:5px;cursor:pointer;font-size:.8rem;
-  transition:background .15s
-}
-.btn-edit:hover{background:#dbeafe}
-.btn-delete{
-  background:#fef2f2;color:#b91c1c;border:1px solid #fecaca;
-  padding:.3rem .7rem;border-radius:5px;cursor:pointer;font-size:.8rem;
-  transition:background .15s
-}
-.btn-delete:hover{background:#fee2e2}
-
-/* ── MODAL ── */
-.modal-overlay{
-  display:none;position:fixed;inset:0;z-index:200;
-  background:rgba(0,0,0,.45);justify-content:center;align-items:center
-}
-.modal-overlay.open{display:flex}
-.modal{
-  background:#fff;border-radius:12px;width:min(560px,95vw);
-  box-shadow:0 8px 32px rgba(0,0,0,.2);overflow:hidden
-}
-.modal-header{
-  background:linear-gradient(90deg,#1a4731,#2d7a4f);
-  color:#fff;padding:1rem 1.4rem;display:flex;justify-content:space-between;align-items:center
-}
-.modal-header h2{font-size:1rem;font-weight:700}
-.modal-close{background:none;border:none;color:#fff;font-size:1.3rem;cursor:pointer;line-height:1}
-.modal-body{padding:1.4rem}
-.form-grid{display:grid;grid-template-columns:1fr 1fr;gap:1rem}
-.form-group{display:flex;flex-direction:column;gap:.35rem}
-.form-group.full{grid-column:1/-1}
-.form-group label{font-size:.8rem;font-weight:600;color:#374151}
-.form-group input,
-.form-group select{
-  border:1px solid #d1d5db;border-radius:6px;padding:.5rem .75rem;
-  font-size:.88rem;outline:none;transition:border-color .15s
-}
-.form-group input:focus,
-.form-group select:focus{border-color:#2d7a4f}
-.modal-footer{padding:1rem 1.4rem;background:#f9fafb;display:flex;justify-content:flex-end;gap:.6rem;border-top:1px solid #f0f0f0}
-.btn-secondary{
-  background:#fff;border:1px solid #d1d5db;color:#374151;
-  padding:.5rem 1rem;border-radius:6px;cursor:pointer;font-size:.88rem
-}
-.btn-secondary:hover{background:#f9fafb}
-
-/* ── TOAST ── */
-#toast{
-  position:fixed;bottom:1.5rem;right:1.5rem;z-index:999;
-  background:#1a4731;color:#fff;padding:.8rem 1.3rem;
-  border-radius:8px;font-size:.88rem;box-shadow:0 4px 16px rgba(0,0,0,.2);
-  opacity:0;transform:translateY(12px);
-  transition:opacity .3s,transform .3s;pointer-events:none
-}
-#toast.show{opacity:1;transform:translateY(0)}
-</style>
-</head>
-<body>
-
-<!-- NAVBAR -->
-<nav class="navbar">
-  <a class="navbar-brand" href="index.php">
-    <svg width="26" height="26" viewBox="0 0 24 24" fill="none" stroke="#a7f3d0" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-      <path d="M12 2a9 9 0 0 1 9 9c0 5-4 9-9 11C8 20 3 16 3 11a9 9 0 0 1 9-9z"/>
-      <path d="M12 7v10M9 10l3-3 3 3"/>
-    </svg>
-    AgriSystem
-  </a>
-  <div class="nav-links">
-    <a href="index.php">Dashboard</a>
-    <a href="farmers.php">Farmers</a>
-    <a href="farms.php">Farms</a>
-    <a href="crops.php">Crops</a>
-    <a href="plantings.php" class="active">Plantings</a>
-    <a href="harvests.php">Harvests</a>
-    <?php if (isAdmin()): ?>
-    <a href="approval_queue.php">Approval Queue</a>
+    <button type="submit" class="btn btn-secondary btn-sm">Filter</button>
+    <?php if ($search !== '' || $filterStatus || $filterCrop): ?>
+    <a href="plantings.php" class="btn btn-secondary btn-sm">Reset</a>
     <?php endif; ?>
-  </div>
-  <div class="user-area">
-    <span><?= htmlspecialchars($user['username'] ?? '', ENT_QUOTES) ?></span>
-    <span class="role-badge"><?= isAdmin() ? 'Admin' : 'Staff' ?></span>
-    <form method="post" action="logout.php" style="margin:0">
-      <button type="submit" class="logout-btn">Logout</button>
-    </form>
-  </div>
-</nav>
+  </form>
 
-<!-- PAGE -->
-<div class="page">
-  <div class="page-header">
-    <h1 class="page-title">🌱 Plantings</h1>
-    <a href="index.php" class="back-link">← Back to Dashboard</a>
+  <div class="toolbar-group">
+    <span style="font-size:0.84rem; color:var(--text-muted); font-weight:500;">
+      Total: <strong><?= number_format($totalRecords) ?></strong> Plantings
+    </span>
   </div>
+</div>
 
-  <?php if ($flashMsg): ?>
-  <div class="flash" id="flash-banner">
-    <?= $flashMsg ?>
-    <button class="flash-close" onclick="document.getElementById('flash-banner').remove()">✕</button>
-  </div>
-  <?php endif; ?>
-
-  <div class="toolbar">
-    <button class="btn-primary" onclick="openModal('add-modal')">+ Add New Planting</button>
-  </div>
-
-  <div class="card">
-    <table>
+<!-- Plantings Data Table -->
+<div class="card">
+  <div class="table-responsive">
+    <table class="data-table">
       <thead>
         <tr>
-          <th>#</th>
-          <th>Farm</th>
-          <th>Crop</th>
+          <th style="width:70px;">ID</th>
+          <th>Crop & Variety</th>
+          <th>Farm & Owner</th>
           <th>Planting Date</th>
           <th>Expected Harvest</th>
-          <th>Area (ha)</th>
+          <th>Area / Seeds</th>
           <th>Status</th>
-          <th>Actions</th>
+          <th style="text-align:right;">Actions</th>
         </tr>
       </thead>
       <tbody>
         <?php if (empty($plantings)): ?>
-        <tr class="empty-row"><td colspan="8">No planting records found.</td></tr>
-        <?php else: ?>
-        <?php foreach ($plantings as $i => $p):
-            $statusLower = strtolower($p['status'] ?? '');
-            if (in_array($statusLower, ['active','planted'])) {
-                $badgeClass = 'badge-green';
-            } elseif ($statusLower === 'harvested') {
-                $badgeClass = 'badge-blue';
-            } elseif ($statusLower === 'failed') {
-                $badgeClass = 'badge-red';
-            } else {
-                $badgeClass = 'badge-gray';
-            }
-            $raw = $plantings_map[$p['planting_id']] ?? [];
-        ?>
         <tr>
-          <td><?= $i + 1 ?></td>
-          <td><?= htmlspecialchars($p['farm_name'] ?? '—', ENT_QUOTES) ?></td>
-          <td><?= htmlspecialchars($p['crop_name'] ?? '—', ENT_QUOTES) ?></td>
-          <td><?= htmlspecialchars($p['planting_date'] ?? '—', ENT_QUOTES) ?></td>
-          <td><?= htmlspecialchars($p['expected_harvest_date'] ?? '—', ENT_QUOTES) ?></td>
-          <td><?= htmlspecialchars($p['area_planted_hectares'] ?? '—', ENT_QUOTES) ?></td>
-          <td><span class="badge <?= $badgeClass ?>"><?= htmlspecialchars($p['status'] ?? '—', ENT_QUOTES) ?></span></td>
+          <td colspan="8" class="empty-state">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="18" rx="2" ry="2"/><line x1="16" y1="2" x2="16" y2="6"/><line x1="8" y1="2" x2="8" y2="6"/><line x1="3" y1="10" x2="21" y2="10"/></svg>
+            <h3>No plantings found</h3>
+            <p><?= $search !== '' || $filterStatus || $filterCrop ? 'No matching planting cycles found. Try clearing your filters.' : 'Record your first crop planting cycle.' ?></p>
+            <?php if ($search === '' && !$filterStatus && !$filterCrop): ?>
+            <button type="button" class="btn btn-primary btn-sm" onclick="openCreatePlantingModal()">+ Record Planting</button>
+            <?php endif; ?>
+          </td>
+        </tr>
+        <?php else: ?>
+        <?php foreach ($plantings as $p): ?>
+        <tr>
+          <td style="font-family:monospace; font-size:0.8rem; color:var(--text-muted);">
+            #<?= (int)$p['planting_id'] ?>
+          </td>
           <td>
-            <button class="btn-edit"
-              onclick="openEdit(
-                <?= (int)$p['planting_id'] ?>,
-                <?= (int)($raw['farm_id'] ?? 0) ?>,
-                <?= (int)($raw['crop_id'] ?? 0) ?>,
-                '<?= htmlspecialchars($raw['planting_date'] ?? '', ENT_QUOTES) ?>',
-                '<?= htmlspecialchars($raw['expected_harvest_date'] ?? '', ENT_QUOTES) ?>',
-                '<?= htmlspecialchars($raw['area_planted_hectares'] ?? '', ENT_QUOTES) ?>',
-                <?= (int)($raw['status_id'] ?? 0) ?>
-              )">Edit</button>
-            <form method="post" action="plantings.php" style="display:inline"
-                  onsubmit="return confirm('Delete this planting record?')">
-              <input type="hidden" name="action" value="delete">
-              <input type="hidden" name="planting_id" value="<?= (int)$p['planting_id'] ?>">
-              <button type="submit" class="btn-delete">Delete</button>
-            </form>
+            <strong><?= e($p['crop_name']) ?></strong>
+            <?php if (!empty($p['variety'])): ?>
+            <span style="font-size:0.8rem; color:var(--text-muted);"> (<?= e($p['variety']) ?>)</span>
+            <?php endif; ?>
+          </td>
+          <td>
+            <strong><?= e($p['farm_name']) ?></strong>
+            <div style="font-size:0.8rem; color:var(--text-muted);">
+              <?= e($p['farmer_last_name'] . ', ' . $p['farmer_first_name']) ?>
+            </div>
+          </td>
+          <td style="font-size:0.85rem;">
+            <?= e(date('M j, Y', strtotime($p['planting_date']))) ?>
+          </td>
+          <td style="font-size:0.85rem;">
+            <?php if (!empty($p['expected_harvest_date'])): ?>
+              <?= e(date('M j, Y', strtotime($p['expected_harvest_date']))) ?>
+              <?php
+                $diffDays = (int)ceil((strtotime($p['expected_harvest_date']) - time()) / 86400);
+                if ($diffDays >= 0 && $diffDays <= 14 && (int)$p['status_id'] !== 3):
+              ?>
+              <span class="badge" style="background:#FEF3C7; color:#D97706; border:1px solid #FDE68A; font-size:0.7rem; margin-left:0.25rem;">
+                Due in <?= $diffDays ?>d
+              </span>
+              <?php endif; ?>
+            <?php else: ?>
+              <span style="color:var(--text-light);">—</span>
+            <?php endif; ?>
+          </td>
+          <td style="font-size:0.82rem;">
+            <div><?= $p['area_planted_hectares'] ? number_format((float)$p['area_planted_hectares'], 2) . ' ha' : '— ha' ?></div>
+            <div style="color:var(--text-muted);"><?= $p['seed_quantity_kg'] ? number_format((float)$p['seed_quantity_kg'], 1) . ' kg seed' : '— kg' ?></div>
+          </td>
+          <td>
+            <?php
+              $badgeClass = match ((int)$p['status_id']) {
+                  1 => 'badge-planted',
+                  2 => 'badge-growing',
+                  3 => 'badge-harvested',
+                  default => 'badge'
+              };
+            ?>
+            <span class="badge <?= $badgeClass ?>">
+              <?= e($p['status_name'] ?: 'Planted') ?>
+            </span>
+            <?php if ((int)$p['harvest_count'] > 0): ?>
+            <div style="font-size:0.75rem; color:var(--brand); margin-top:0.2rem; font-weight:600;">
+              <?= number_format((float)$p['total_harvested_kg'], 1) ?> kg harvested
+            </div>
+            <?php endif; ?>
+          </td>
+          <td style="text-align:right;">
+            <div style="display:inline-flex; align-items:center; gap:0.35rem;">
+              <button type="button" class="btn btn-secondary btn-sm"
+                      onclick='openEditPlantingModal(<?= (int)$p['planting_id'] ?>, <?= (int)$p['farm_id'] ?>, <?= (int)$p['crop_id'] ?>, <?= json_encode($p['planting_date']) ?>, <?= (float)($p['area_planted_hectares'] ?? 0) ?>, <?= (float)($p['seed_quantity_kg'] ?? 0) ?>, <?= json_encode($p['expected_harvest_date']) ?>, <?= (int)$p['status_id'] ?>)'>
+                Edit
+              </button>
+
+              <?php if (isAdmin()): ?>
+              <form method="POST" action="plantings.php" data-confirm-delete data-record-name="Planting #<?= (int)$p['planting_id'] ?> (<?= e($p['crop_name']) ?>)" style="display:inline;">
+                <input type="hidden" name="action" value="soft_delete">
+                <input type="hidden" name="planting_id" value="<?= (int)$p['planting_id'] ?>">
+                <button type="submit" class="btn btn-secondary btn-sm" style="color:var(--danger); border-color:var(--danger-border);">
+                  Delete
+                </button>
+              </form>
+              <?php endif; ?>
+            </div>
           </td>
         </tr>
         <?php endforeach; ?>
@@ -391,177 +543,216 @@ tbody tr:last-child td{border-bottom:none}
       </tbody>
     </table>
   </div>
+
+  <!-- Pagination -->
+  <?php if ($totalPages > 1): ?>
+  <div class="pagination-wrap">
+    <div class="pagination-info">
+      Showing <?= $offset + 1 ?> to <?= min($offset + $perPage, $totalRecords) ?> of <?= number_format($totalRecords) ?> plantings
+    </div>
+    <ul class="pagination">
+      <?php
+        $baseParams = $_GET;
+        $prevUrl = '?page=' . ($page - 1) . '&' . http_build_query(array_diff_key($baseParams, ['page' => '']));
+        $nextUrl = '?page=' . ($page + 1) . '&' . http_build_query(array_diff_key($baseParams, ['page' => '']));
+      ?>
+      <li class="page-item <?= ($page <= 1) ? 'disabled' : '' ?>">
+        <a href="<?= e($prevUrl) ?>" class="page-link" data-pjax>« Prev</a>
+      </li>
+      <?php for ($p = max(1, $page - 2); $p <= min($totalPages, $page + 2); $p++): ?>
+      <li class="page-item <?= ($p === $page) ? 'active' : '' ?>">
+        <a href="?page=<?= $p ?>&<?= http_build_query(array_diff_key($baseParams, ['page' => ''])) ?>" class="page-link" data-pjax><?= $p ?></a>
+      </li>
+      <?php endfor; ?>
+      <li class="page-item <?= ($page >= $totalPages) ? 'disabled' : '' ?>">
+        <a href="<?= e($nextUrl) ?>" class="page-link" data-pjax>Next »</a>
+      </li>
+    </ul>
+  </div>
+  <?php endif; ?>
 </div>
 
-<!-- ADD MODAL -->
-<div class="modal-overlay" id="add-modal">
-  <div class="modal">
-    <div class="modal-header">
-      <h2>Add New Planting</h2>
-      <button class="modal-close" onclick="closeModal('add-modal')">✕</button>
+<!-- Modal: Add Planting -->
+<div id="modal-create-planting" class="sp-modal-backdrop" role="dialog" aria-modal="true">
+  <div class="sp-modal-dialog">
+    <div class="sp-modal-header">
+      <h3 class="sp-modal-title">Record New Planting</h3>
+      <button type="button" class="sp-modal-close" onclick="closeModal('modal-create-planting')">&times;</button>
     </div>
-    <form method="post" action="plantings.php">
-      <input type="hidden" name="action" value="add">
-      <div class="modal-body">
+    <form method="POST" action="plantings.php" data-pjax autocomplete="off">
+      <input type="hidden" name="action" value="create">
+
+      <div class="sp-modal-body">
+        <div class="form-group">
+          <label class="form-label" for="add_farm_id">Target Farm <span style="color:var(--danger)">*</span></label>
+          <select id="add_farm_id" name="farm_id" class="form-control" required>
+            <option value="">-- Select Farm --</option>
+            <?php foreach ($activeFarms as $fm): ?>
+            <option value="<?= (int)$fm['farm_id'] ?>">
+              <?= e($fm['farm_name']) ?> (Owner: <?= e($fm['last_name'] . ', ' . $fm['first_name']) ?>)
+            </option>
+            <?php endforeach; ?>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="add_crop_id">Crop <span style="color:var(--danger)">*</span></label>
+          <select id="add_crop_id" name="crop_id" class="form-control" required>
+            <option value="">-- Select Crop --</option>
+            <?php foreach ($activeCrops as $cp): ?>
+            <option value="<?= (int)$cp['crop_id'] ?>" data-days="<?= (int)($cp['growing_days'] ?? 0) ?>">
+              <?= e($cp['crop_name']) ?><?= $cp['variety'] ? ' (' . e($cp['variety']) . ')' : '' ?><?= $cp['growing_days'] ? ' · ' . $cp['growing_days'] . 'd' : '' ?>
+            </option>
+            <?php endforeach; ?>
+          </select>
+        </div>
+
         <div class="form-grid">
           <div class="form-group">
-            <label for="add-farm">Farm *</label>
-            <select id="add-farm" name="farm_id" required>
-              <option value="">— Select Farm —</option>
-              <?php foreach ($farms as $f): ?>
-              <option value="<?= (int)$f['farm_id'] ?>"><?= htmlspecialchars($f['farm_name'], ENT_QUOTES) ?></option>
-              <?php endforeach; ?>
-            </select>
+            <label class="form-label" for="add_p_date">Planting Date <span style="color:var(--danger)">*</span></label>
+            <input type="date" id="add_p_date" name="planting_date" class="form-control" value="<?= date('Y-m-d') ?>" required>
           </div>
           <div class="form-group">
-            <label for="add-crop">Crop *</label>
-            <select id="add-crop" name="crop_id" required>
-              <option value="">— Select Crop —</option>
-              <?php foreach ($crops as $c): ?>
-              <option value="<?= (int)$c['crop_id'] ?>"><?= htmlspecialchars($c['crop_name'], ENT_QUOTES) ?></option>
-              <?php endforeach; ?>
-            </select>
-          </div>
-          <div class="form-group">
-            <label for="add-pdate">Planting Date *</label>
-            <input type="date" id="add-pdate" name="planting_date" required>
-          </div>
-          <div class="form-group">
-            <label for="add-hdate">Expected Harvest Date</label>
-            <input type="date" id="add-hdate" name="expected_harvest_date">
-          </div>
-          <div class="form-group">
-            <label for="add-area">Area Planted (ha) *</label>
-            <input type="number" id="add-area" name="area_planted_hectares" step="0.01" min="0" required>
-          </div>
-          <div class="form-group">
-            <label for="add-status">Status *</label>
-            <select id="add-status" name="status_id" required>
-              <option value="">— Select Status —</option>
-              <?php foreach ($statuses as $s): ?>
-              <option value="<?= (int)$s['status_id'] ?>"><?= htmlspecialchars($s['description'], ENT_QUOTES) ?></option>
-              <?php endforeach; ?>
-            </select>
+            <label class="form-label" for="add_exp_date">Expected Harvest Date</label>
+            <input type="date" id="add_exp_date" name="expected_harvest_date" class="form-control">
+            <span class="form-hint">Must be later than planting date.</span>
           </div>
         </div>
+
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label" for="add_area_planted">Area Planted (Hectares)</label>
+            <input type="number" id="add_area_planted" name="area_planted_hectares" class="form-control" step="0.01" min="0" placeholder="e.g. 1.25">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="add_seeds">Seed Quantity (kg)</label>
+            <input type="number" id="add_seeds" name="seed_quantity_kg" class="form-control" step="0.01" min="0" placeholder="e.g. 40.00">
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="add_status">Current Status</label>
+          <select id="add_status" name="status_id" class="form-control" required>
+            <?php foreach ($activeStatuses as $st): ?>
+            <option value="<?= (int)$st['status_id'] ?>" <?= (int)$st['status_id'] === 1 ? 'selected' : '' ?>>
+              <?= e($st['description']) ?>
+            </option>
+            <?php endforeach; ?>
+          </select>
+        </div>
       </div>
-      <div class="modal-footer">
-        <button type="button" class="btn-secondary" onclick="closeModal('add-modal')">Cancel</button>
-        <button type="submit" class="btn-primary">Save Planting</button>
+
+      <div class="sp-modal-footer">
+        <button type="button" class="btn btn-secondary" onclick="closeModal('modal-create-planting')">Cancel</button>
+        <button type="submit" class="btn btn-primary">Save Planting</button>
       </div>
     </form>
   </div>
 </div>
 
-<!-- EDIT MODAL -->
-<div class="modal-overlay" id="edit-modal">
-  <div class="modal">
-    <div class="modal-header">
-      <h2>Edit Planting</h2>
-      <button class="modal-close" onclick="closeModal('edit-modal')">✕</button>
+<!-- Modal: Edit Planting -->
+<div id="modal-edit-planting" class="sp-modal-backdrop" role="dialog" aria-modal="true">
+  <div class="sp-modal-dialog">
+    <div class="sp-modal-header">
+      <h3 class="sp-modal-title">Edit Planting Cycle</h3>
+      <button type="button" class="sp-modal-close" onclick="closeModal('modal-edit-planting')">&times;</button>
     </div>
-    <form method="post" action="plantings.php">
-      <input type="hidden" name="action" value="edit">
-      <input type="hidden" name="planting_id" id="edit-planting-id">
-      <div class="modal-body">
+    <form method="POST" action="plantings.php" data-pjax autocomplete="off">
+      <input type="hidden" name="action" value="update">
+      <input type="hidden" id="edit_planting_id" name="planting_id" value="">
+
+      <div class="sp-modal-body">
+        <div class="form-group">
+          <label class="form-label" for="edit_farm_id">Target Farm <span style="color:var(--danger)">*</span></label>
+          <select id="edit_farm_id" name="farm_id" class="form-control" required>
+            <?php foreach ($activeFarms as $fm): ?>
+            <option value="<?= (int)$fm['farm_id'] ?>">
+              <?= e($fm['farm_name']) ?> (Owner: <?= e($fm['last_name'] . ', ' . $fm['first_name']) ?>)
+            </option>
+            <?php endforeach; ?>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="edit_crop_id">Crop <span style="color:var(--danger)">*</span></label>
+          <select id="edit_crop_id" name="crop_id" class="form-control" required>
+            <?php foreach ($activeCrops as $cp): ?>
+            <option value="<?= (int)$cp['crop_id'] ?>">
+              <?= e($cp['crop_name']) ?><?= $cp['variety'] ? ' (' . e($cp['variety']) . ')' : '' ?>
+            </option>
+            <?php endforeach; ?>
+          </select>
+        </div>
+
         <div class="form-grid">
           <div class="form-group">
-            <label for="edit-farm">Farm *</label>
-            <select id="edit-farm" name="farm_id" required>
-              <option value="">— Select Farm —</option>
-              <?php foreach ($farms as $f): ?>
-              <option value="<?= (int)$f['farm_id'] ?>"><?= htmlspecialchars($f['farm_name'], ENT_QUOTES) ?></option>
-              <?php endforeach; ?>
-            </select>
+            <label class="form-label" for="edit_p_date">Planting Date <span style="color:var(--danger)">*</span></label>
+            <input type="date" id="edit_p_date" name="planting_date" class="form-control" required>
           </div>
           <div class="form-group">
-            <label for="edit-crop">Crop *</label>
-            <select id="edit-crop" name="crop_id" required>
-              <option value="">— Select Crop —</option>
-              <?php foreach ($crops as $c): ?>
-              <option value="<?= (int)$c['crop_id'] ?>"><?= htmlspecialchars($c['crop_name'], ENT_QUOTES) ?></option>
-              <?php endforeach; ?>
-            </select>
-          </div>
-          <div class="form-group">
-            <label for="edit-pdate">Planting Date *</label>
-            <input type="date" id="edit-pdate" name="planting_date" required>
-          </div>
-          <div class="form-group">
-            <label for="edit-hdate">Expected Harvest Date</label>
-            <input type="date" id="edit-hdate" name="expected_harvest_date">
-          </div>
-          <div class="form-group">
-            <label for="edit-area">Area Planted (ha) *</label>
-            <input type="number" id="edit-area" name="area_planted_hectares" step="0.01" min="0" required>
-          </div>
-          <div class="form-group">
-            <label for="edit-status">Status *</label>
-            <select id="edit-status" name="status_id" required>
-              <option value="">— Select Status —</option>
-              <?php foreach ($statuses as $s): ?>
-              <option value="<?= (int)$s['status_id'] ?>"><?= htmlspecialchars($s['description'], ENT_QUOTES) ?></option>
-              <?php endforeach; ?>
-            </select>
+            <label class="form-label" for="edit_exp_date">Expected Harvest Date</label>
+            <input type="date" id="edit_exp_date" name="expected_harvest_date" class="form-control">
           </div>
         </div>
+
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label" for="edit_area_planted">Area Planted (Hectares)</label>
+            <input type="number" id="edit_area_planted" name="area_planted_hectares" class="form-control" step="0.01" min="0">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="edit_seeds">Seed Quantity (kg)</label>
+            <input type="number" id="edit_seeds" name="seed_quantity_kg" class="form-control" step="0.01" min="0">
+          </div>
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="edit_status">Current Status</label>
+          <select id="edit_status" name="status_id" class="form-control" required>
+            <?php foreach ($activeStatuses as $st): ?>
+            <option value="<?= (int)$st['status_id'] ?>">
+              <?= e($st['description']) ?>
+            </option>
+            <?php endforeach; ?>
+          </select>
+        </div>
       </div>
-      <div class="modal-footer">
-        <button type="button" class="btn-secondary" onclick="closeModal('edit-modal')">Cancel</button>
-        <button type="submit" class="btn-primary"><?= isAdmin() ? 'Update Planting' : 'Submit for Approval' ?></button>
+
+      <div class="sp-modal-footer">
+        <button type="button" class="btn btn-secondary" onclick="closeModal('modal-edit-planting')">Cancel</button>
+        <button type="submit" class="btn btn-primary">Update Planting</button>
       </div>
     </form>
   </div>
 </div>
-
-<div id="toast"></div>
 
 <script>
-function openModal(id) {
-  document.getElementById(id).classList.add('open');
-}
-function closeModal(id) {
-  document.getElementById(id).classList.remove('open');
-}
-
-function openEdit(plantingId, farmId, cropId, plantingDate, expectedHarvestDate, area, statusId) {
-  document.getElementById('edit-planting-id').value = plantingId;
-
-  var farmSel = document.getElementById('edit-farm');
-  for (var i = 0; i < farmSel.options.length; i++) {
-    farmSel.options[i].selected = (parseInt(farmSel.options[i].value) === farmId);
+  function openCreatePlantingModal() {
+    if (typeof openModal === 'function') {
+      openModal('modal-create-planting');
+    } else {
+      document.getElementById('modal-create-planting').classList.add('open');
+    }
   }
-  var cropSel = document.getElementById('edit-crop');
-  for (var i = 0; i < cropSel.options.length; i++) {
-    cropSel.options[i].selected = (parseInt(cropSel.options[i].value) === cropId);
+  function openEditPlantingModal(id, farmId, cropId, pDate, area, seeds, expDate, statusId) {
+    document.getElementById('edit_planting_id').value = id;
+    document.getElementById('edit_farm_id').value = farmId;
+    document.getElementById('edit_crop_id').value = cropId;
+    document.getElementById('edit_p_date').value = pDate;
+    document.getElementById('edit_area_planted').value = area || '';
+    document.getElementById('edit_seeds').value = seeds || '';
+    document.getElementById('edit_exp_date').value = expDate || '';
+    document.getElementById('edit_status').value = statusId;
+    if (typeof openModal === 'function') {
+      openModal('modal-edit-planting');
+    } else {
+      document.getElementById('modal-edit-planting').classList.add('open');
+    }
   }
-  document.getElementById('edit-pdate').value = plantingDate;
-  document.getElementById('edit-hdate').value = expectedHarvestDate;
-  document.getElementById('edit-area').value = area;
-  var statusSel = document.getElementById('edit-status');
-  for (var i = 0; i < statusSel.options.length; i++) {
-    statusSel.options[i].selected = (parseInt(statusSel.options[i].value) === statusId);
+  function closeModal(id) {
+    const el = document.getElementById(id);
+    if (el) el.classList.remove('open');
   }
-  openModal('edit-modal');
-}
-
-// Close modal on overlay click
-document.querySelectorAll('.modal-overlay').forEach(function(overlay) {
-  overlay.addEventListener('click', function(e) {
-    if (e.target === overlay) closeModal(overlay.id);
-  });
-});
-
-// Toast
-(function() {
-  var msg = <?= json_encode($flashMsg) ?>;
-  if (msg) {
-    var toast = document.getElementById('toast');
-    toast.textContent = msg;
-    toast.classList.add('show');
-    setTimeout(function() { toast.classList.remove('show'); }, 4000);
-  }
-})();
 </script>
-</body>
-</html>
+
+<?php require_once __DIR__ . '/includes/footer.php'; ?>

@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Login – Agriculture Information System</title>
+<title>Sign In – Leafty Agriculture IS</title>
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -12,17 +12,18 @@
     display: flex;
     align-items: center;
     justify-content: center;
-    background: linear-gradient(135deg, #1a4731 0%, #2d7a4f 50%, #4caf50 100%);
-    font-family: 'Segoe UI', system-ui, sans-serif;
+    background: linear-gradient(135deg, #122B20 0%, #1B4332 50%, #2D6A4F 100%);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
   }
 
   .card {
-    background: #fff;
+    background: #FFFFFF;
     border-radius: 16px;
-    box-shadow: 0 20px 60px rgba(0,0,0,.25);
+    box-shadow: 0 20px 60px rgba(18, 43, 32, 0.28);
     width: 100%;
     max-width: 420px;
     padding: 48px 40px 40px;
+    border: 1px solid #DCE4DF;
   }
 
   .logo {
@@ -33,13 +34,13 @@
   .logo h1 {
     font-size: 1.3rem;
     font-weight: 700;
-    color: #1a4731;
+    color: #18221D;
     margin-top: 10px;
     line-height: 1.3;
   }
   .logo p {
     font-size: .8rem;
-    color: #6b7280;
+    color: #52635A;
     margin-top: 4px;
   }
 
@@ -48,23 +49,25 @@
     display: block;
     font-size: .82rem;
     font-weight: 600;
-    color: #374151;
+    color: #18221D;
     margin-bottom: 6px;
   }
   input[type="text"],
   input[type="password"] {
     width: 100%;
     padding: 11px 14px;
-    border: 1.5px solid #d1d5db;
+    border: 1.5px solid #DCE4DF;
     border-radius: 8px;
     font-size: .95rem;
-    color: #111827;
-    transition: border-color .2s, box-shadow .2s;
+    color: #18221D;
+    background: #F8F9F6;
+    transition: border-color .2s, box-shadow .2s, background .2s;
     outline: none;
   }
   input:focus {
-    border-color: #2d7a4f;
-    box-shadow: 0 0 0 3px rgba(45,122,79,.15);
+    background: #FFFFFF;
+    border-color: #1B4332;
+    box-shadow: 0 0 0 3px rgba(27, 67, 50, 0.2);
   }
 
   .pw-wrap { position: relative; }
@@ -74,16 +77,16 @@
     right: 12px; top: 50%;
     transform: translateY(-50%);
     background: none; border: none;
-    cursor: pointer; color: #9ca3af;
+    cursor: pointer; color: #7E8F85;
     padding: 0; line-height: 1;
   }
-  .toggle-pw:hover { color: #374151; }
+  .toggle-pw:hover { color: #18221D; }
 
   .btn {
     display: block;
     width: 100%;
     padding: 13px;
-    background: #2d7a4f;
+    background: #1B4332;
     color: #fff;
     font-size: 1rem;
     font-weight: 600;
@@ -93,9 +96,9 @@
     transition: background .2s, transform .1s;
     margin-top: 8px;
   }
-  .btn:hover  { background: #1a4731; }
+  .btn:hover  { background: #2D6A4F; }
   .btn:active { transform: scale(.98); }
-  .btn:disabled { background: #9ca3af; cursor: not-allowed; }
+  .btn:disabled { background: #7E8F85; cursor: not-allowed; }
 
   .alert {
     padding: 12px 14px;
@@ -104,8 +107,8 @@
     margin-bottom: 20px;
     display: none;
   }
-  .alert.error   { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
-  .alert.success { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
+  .alert.error   { background: #FEE2E2; color: #DC2626; border: 1px solid #FECACA; }
+  .alert.success { background: #DCFCE7; color: #15803D; border: 1px solid #BBF7D0; }
   .alert.show    { display: block; }
 
   .spinner {
@@ -128,13 +131,13 @@
   <div class="logo">
     <!-- Leaf / plant icon -->
     <svg viewBox="0 0 56 56" fill="none" xmlns="http://www.w3.org/2000/svg">
-      <circle cx="28" cy="28" r="28" fill="#f0fdf4"/>
-      <path d="M28 44V24" stroke="#2d7a4f" stroke-width="2.5" stroke-linecap="round"/>
-      <path d="M28 36c0 0-8-4-8-12 0 0 8 2 8 12z" fill="#4caf50"/>
-      <path d="M28 30c0 0 8-4 8-12 0 0-8 2-8 12z" fill="#2d7a4f"/>
+      <circle cx="28" cy="28" r="28" fill="#E9F5EE"/>
+      <path d="M28 44V24" stroke="#1B4332" stroke-width="2.5" stroke-linecap="round"/>
+      <path d="M28 36c0 0-8-4-8-12 0 0 8 2 8 12z" fill="#2D6A4F"/>
+      <path d="M28 30c0 0 8-4 8-12 0 0-8 2-8 12z" fill="#1B4332"/>
     </svg>
-    <h1>Agriculture<br>Information System</h1>
-    <p>Sign in to your account</p>
+    <h1>Leafty</h1>
+    <p>Agriculture Information System Portal</p>
   </div>
 
   <div class="alert error" id="alertBox"></div>

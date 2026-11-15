@@ -1,753 +1,588 @@
 <?php
+declare(strict_types=1);
+
 /**
  * crops.php
- * Manage crop records — role-aware (Administrator / Staff).
+ * Leafty - Crop Catalog Management (Operational Module)
+ * Soft delete guarded via canSoftDelete() & audited via logActivity()
  */
 
+$pageTitle = 'Crops - Leafty';
+require_once __DIR__ . '/config/database.php';
 require_once __DIR__ . '/includes/auth.php';
+requireLogin();
 
-requireLogin('login.html');
+require_once __DIR__ . '/includes/soft_delete_guard.php';
 
-$user   = currentUser();
-$roleId = currentRoleId();
-$roleName = ($roleId === ROLE_ADMIN) ? 'Administrator' : 'Staff';
+$currentUserId = (int)currentUserId();
+$msg = '';
+$msgType = 'info';
 
-/* ─── POST handlers (before HTML) ────────────────────────────── */
+if (isset($_GET['updated'])) {
+    $msg = $_SESSION['flash_msg'] ?? 'Crop updated successfully.';
+    $msgType = $_SESSION['flash_type'] ?? 'success';
+    unset($_SESSION['flash_msg'], $_SESSION['flash_type']);
+} elseif (isset($_GET['created'])) {
+    $msg = $_SESSION['flash_msg'] ?? 'Crop added successfully.';
+    $msgType = $_SESSION['flash_type'] ?? 'success';
+    unset($_SESSION['flash_msg'], $_SESSION['flash_type']);
+} elseif (isset($_GET['deleted'])) {
+    $msg = $_SESSION['flash_msg'] ?? 'Crop deactivated successfully.';
+    $msgType = $_SESSION['flash_type'] ?? 'success';
+    unset($_SESSION['flash_msg'], $_SESSION['flash_type']);
+} elseif (isset($_SESSION['flash_msg'])) {
+    $msg = $_SESSION['flash_msg'];
+    $msgType = $_SESSION['flash_type'] ?? 'info';
+    unset($_SESSION['flash_msg'], $_SESSION['flash_type']);
+}
+
+// Handle POST actions (Create, Update, Soft Delete)
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    $action   = $_POST['action'] ?? '';
-    $crop_id  = isset($_POST['crop_id']) ? (int)$_POST['crop_id'] : 0;
+    $action = $_POST['action'] ?? '';
 
-    $crop_name   = trim($_POST['crop_name']   ?? '');
-    $category_id = isset($_POST['category_id']) ? (int)$_POST['category_id'] : null;
-    $growing_days = isset($_POST['growing_days']) ? (int)$_POST['growing_days'] : null;
-    $selling_price = isset($_POST['selling_price_per_kg']) ? (float)$_POST['selling_price_per_kg'] : null;
-    $userId = (int)$user['user_id'];
+    // 1. ADD CROP
+    if ($action === 'create') {
+        $cropName    = trim((string)($_POST['crop_name'] ?? ''));
+        $variety     = trim((string)($_POST['variety'] ?? ''));
+        $categoryId  = (int)($_POST['category_id'] ?? 0) ?: null;
+        $growingDays = (int)($_POST['growing_days'] ?? 0) ?: null;
+        $seasonId    = (int)($_POST['season_id'] ?? 0) ?: null;
 
-    if ($action === 'add') {
-        $stmt = $pdo->prepare("
-            INSERT INTO \"crops\"
-                (crop_name, category_id, growing_days, selling_price_per_kg,
-                 created_by, updated_by, created_at, updated_at)
-            VALUES
-                (:crop_name, :category_id, :growing_days, :selling_price,
-                 :created_by, :updated_by, NOW(), NOW())
-        ");
-        $stmt->execute([
-            ':crop_name'    => $crop_name,
-            ':category_id'  => $category_id,
-            ':growing_days' => $growing_days,
-            ':selling_price'=> $selling_price,
-            ':created_by'   => $userId,
-            ':updated_by'   => $userId,
-        ]);
-        header('Location: crops.php?msg=Crop+added+successfully.');
-        exit;
-
-    } elseif ($action === 'edit') {
-        if (isAdmin()) {
-            $stmt = $pdo->prepare("
-                UPDATE \"crops\"
-                SET crop_name            = :crop_name,
-                    category_id          = :category_id,
-                    growing_days         = :growing_days,
-                    selling_price_per_kg = :selling_price,
-                    updated_by           = :updated_by,
-                    updated_at           = NOW()
-                WHERE crop_id = :crop_id
-            ");
-            $stmt->execute([
-                ':crop_name'    => $crop_name,
-                ':category_id'  => $category_id,
-                ':growing_days' => $growing_days,
-                ':selling_price'=> $selling_price,
-                ':updated_by'   => $userId,
-                ':crop_id'      => $crop_id,
-            ]);
-            header('Location: crops.php?msg=Crop+updated+successfully.');
-            exit;
+        if ($cropName === '') {
+            $msg = 'Crop name is required.';
+            $msgType = 'error';
         } else {
-            // Staff: submit change request
-            $proposed = [
-                'crop_name'            => $crop_name,
-                'category_id'          => $category_id,
-                'growing_days'         => $growing_days,
-                'selling_price_per_kg' => $selling_price,
-                'updated_by'           => $userId,
-                'updated_at'           => 'NOW()',
-            ];
-            submitOrRequestChange('UPDATE', 'crops', $crop_id, $proposed, function() {});
-            header('Location: crops.php?msg=Request+submitted+for+Admin+approval.');
-            exit;
+            try {
+                $pdo->beginTransaction();
+                $stmt = $pdo->prepare("
+                    INSERT INTO crops
+                        (crop_name, variety, category_id, growing_days, season_id, is_deleted, created_at, updated_at, created_by, updated_by)
+                    VALUES
+                        (:crop_name, :variety, :cat, :days, :season, FALSE, NOW(), NOW(), :created_by, :updated_by)
+                    RETURNING crop_id
+                ");
+                $stmt->execute([
+                    ':crop_name'   => $cropName,
+                    ':variety'     => $variety ?: null,
+                    ':cat'         => $categoryId,
+                    ':days'        => $growingDays,
+                    ':season'      => $seasonId,
+                    ':created_by'  => $currentUserId,
+                    ':updated_by'  => $currentUserId,
+                ]);
+                $newCropId = (int)$stmt->fetchColumn();
+
+                $newData = [
+                    'crop_id'      => $newCropId,
+                    'crop_name'    => $cropName,
+                    'variety'      => $variety,
+                    'category_id'  => $categoryId,
+                    'growing_days' => $growingDays,
+                    'season_id'    => $seasonId,
+                ];
+
+                logActivity($pdo, 'CREATE', 'crops', $newCropId, "Added crop '{$cropName}'", null, $newData);
+                $pdo->commit();
+
+                $_SESSION['flash_msg'] = "Crop '{$cropName}' added successfully.";
+                $_SESSION['flash_type'] = 'success';
+                header('Location: crops.php?created=1');
+                exit;
+            } catch (Throwable $e) {
+                if ($pdo->inTransaction()) $pdo->rollBack();
+                error_log('Crop creation failed: ' . $e->getMessage());
+                $msg = 'Failed to add crop: ' . $e->getMessage();
+                $msgType = 'error';
+            }
         }
+    }
 
-    } elseif ($action === 'delete') {
-        if (isAdmin()) {
-            $stmt = $pdo->prepare("DELETE FROM \"crops\" WHERE crop_id = :crop_id");
-            $stmt->execute([':crop_id' => $crop_id]);
-            header('Location: crops.php?msg=Crop+deleted+successfully.');
-            exit;
+    // 2. UPDATE CROP
+    elseif ($action === 'update') {
+        $cropId      = (int)($_POST['crop_id'] ?? 0);
+        $cropName    = trim((string)($_POST['crop_name'] ?? ''));
+        $variety     = trim((string)($_POST['variety'] ?? ''));
+        $categoryId  = (int)($_POST['category_id'] ?? 0) ?: null;
+        $growingDays = (int)($_POST['growing_days'] ?? 0) ?: null;
+        $seasonId    = (int)($_POST['season_id'] ?? 0) ?: null;
+
+        if ($cropId <= 0 || $cropName === '') {
+            $msg = 'Valid crop ID and crop name are required.';
+            $msgType = 'error';
         } else {
-            submitOrRequestChange('DELETE', 'crops', $crop_id, [], function() {});
-            header('Location: crops.php?msg=Delete+request+submitted+for+Admin+approval.');
-            exit;
+            try {
+                $cur = $pdo->prepare("SELECT * FROM crops WHERE crop_id = :id AND is_deleted = FALSE");
+                $cur->execute([':id' => $cropId]);
+                $oldRow = $cur->fetch(PDO::FETCH_ASSOC);
+
+                if (!$oldRow) {
+                    $msg = 'Crop not found or already deleted.';
+                    $msgType = 'error';
+                } else {
+                    $pdo->beginTransaction();
+                    $stmt = $pdo->prepare("
+                        UPDATE crops
+                        SET crop_name = :crop_name,
+                            variety = :variety,
+                            category_id = :cat,
+                            growing_days = :days,
+                            season_id = :season,
+                            updated_at = NOW(),
+                            updated_by = :updated_by
+                        WHERE crop_id = :id
+                    ");
+                    $stmt->execute([
+                        ':crop_name'   => $cropName,
+                        ':variety'     => $variety ?: null,
+                        ':cat'         => $categoryId,
+                        ':days'        => $growingDays,
+                        ':season'      => $seasonId,
+                        ':updated_by'  => $currentUserId,
+                        ':id'          => $cropId,
+                    ]);
+
+                    $newData = [
+                        'crop_name'    => $cropName,
+                        'variety'      => $variety,
+                        'category_id'  => $categoryId,
+                        'growing_days' => $growingDays,
+                        'season_id'    => $seasonId,
+                    ];
+
+                    logActivity($pdo, 'UPDATE', 'crops', $cropId, "Updated crop '{$cropName}'", $oldRow, $newData);
+                    $pdo->commit();
+
+                    $_SESSION['flash_msg'] = "Crop '{$cropName}' updated successfully.";
+                    $_SESSION['flash_type'] = 'success';
+                    header('Location: crops.php?updated=1');
+                    exit;
+                }
+            } catch (Throwable $e) {
+                if ($pdo->inTransaction()) $pdo->rollBack();
+                error_log('Crop update failed: ' . $e->getMessage());
+                $msg = 'Failed to update crop: ' . $e->getMessage();
+                $msgType = 'error';
+            }
+        }
+    }
+
+    // 3. SOFT DELETE CROP (Admin Only)
+    elseif ($action === 'soft_delete') {
+        if (!isAdmin()) {
+            $msg = 'Only Administrators have permission to delete records.';
+            $msgType = 'error';
+        } else {
+            $cropId = (int)($_POST['crop_id'] ?? 0);
+
+            $guard = canSoftDelete($pdo, 'crops', $cropId);
+            if (!$guard['allowed']) {
+                $msg = $guard['message'];
+                $msgType = 'error';
+            } else {
+                try {
+                    $cur = $pdo->prepare("SELECT * FROM crops WHERE crop_id = :id");
+                    $cur->execute([':id' => $cropId]);
+                    $oldRow = $cur->fetch(PDO::FETCH_ASSOC);
+
+                    $pdo->beginTransaction();
+                    $stmt = $pdo->prepare("UPDATE crops SET is_deleted = TRUE, updated_at = NOW(), updated_by = :updated_by WHERE crop_id = :id");
+                    $stmt->execute([
+                        ':updated_by' => $currentUserId,
+                        ':id'         => $cropId,
+                    ]);
+
+                    logActivity($pdo, 'SOFT_DELETE', 'crops', $cropId, "Soft-deleted crop '{$oldRow['crop_name']}'", $oldRow);
+                    $pdo->commit();
+
+                    $_SESSION['flash_msg'] = "Crop '{$oldRow['crop_name']}' deactivated successfully.";
+                    $_SESSION['flash_type'] = 'success';
+                    header('Location: crops.php?deleted=1');
+                    exit;
+                } catch (Throwable $e) {
+                    if ($pdo->inTransaction()) $pdo->rollBack();
+                    error_log('Crop delete failed: ' . $e->getMessage());
+                    $msg = 'Failed to delete crop: ' . $e->getMessage();
+                    $msgType = 'error';
+                }
+            }
         }
     }
 }
 
-/* ─── Fetch crops with category JOIN ─────────────────────────── */
-$stmt = $pdo->query("
-    SELECT c.crop_id, c.crop_name, cc.description AS category,
-           c.growing_days, c.selling_price_per_kg, c.created_at
-    FROM \"crops\" c
-    LEFT JOIN \"crop_categories\" cc ON cc.category_id = c.category_id
-    ORDER BY c.crop_id DESC
-");
-$crops = $stmt->fetchAll();
+require_once __DIR__ . '/includes/header.php';
 
-/* ─── Fetch categories for dropdown ──────────────────────────── */
-$catStmt = $pdo->query("
-    SELECT category_id, description
-    FROM \"crop_categories\"
-    ORDER BY description ASC
-");
-$categories = $catStmt->fetchAll();
+// Active lookup options for dropdowns
+$activeCategories = $pdo->query("SELECT category_id, description FROM crop_categories WHERE is_deleted = FALSE ORDER BY description ASC")->fetchAll(PDO::FETCH_ASSOC);
+$activeSeasons    = $pdo->query("SELECT season_id, description FROM seasons WHERE is_deleted = FALSE ORDER BY description ASC")->fetchAll(PDO::FETCH_ASSOC);
 
-/* ─── Flash message ──────────────────────────────────────────── */
-$flashMsg = isset($_GET['msg']) ? trim($_GET['msg']) : '';
+// Search, Filters & Pagination
+$search      = trim((string)($_GET['search'] ?? ''));
+$filterCat   = (int)($_GET['cat_id'] ?? 0);
+$filterSeas  = (int)($_GET['season_id'] ?? 0);
+$page        = max(1, (int)($_GET['page'] ?? 1));
+$perPage     = 15;
+$offset      = ($page - 1) * $perPage;
+
+$whereClauses = ["c.is_deleted = FALSE"];
+$params       = [];
+
+if ($search !== '') {
+    $whereClauses[] = "(c.crop_name ILIKE :s OR c.variety ILIKE :s)";
+    $params[':s'] = "%{$search}%";
+}
+if ($filterCat > 0) {
+    $whereClauses[] = "c.category_id = :cat";
+    $params[':cat'] = $filterCat;
+}
+if ($filterSeas > 0) {
+    $whereClauses[] = "c.season_id = :season";
+    $params[':season'] = $filterSeas;
+}
+$whereSql = 'WHERE ' . implode(' AND ', $whereClauses);
+
+// Count
+$countStmt = $pdo->prepare("SELECT COUNT(*) FROM crops c {$whereSql}");
+$countStmt->execute($params);
+$totalRecords = (int)$countStmt->fetchColumn();
+$totalPages = max(1, (int)ceil($totalRecords / $perPage));
+
+// Fetch Records with JOINs
+$query = "
+    SELECT c.crop_id, c.crop_name, c.variety, c.category_id, c.growing_days,
+           c.season_id, c.created_at,
+           cc.description AS category_name,
+           s.description  AS season_name,
+           COALESCE(pl.planting_count, 0) AS active_plantings
+    FROM crops c
+    LEFT JOIN crop_categories cc ON cc.category_id = c.category_id
+    LEFT JOIN seasons s ON s.season_id = c.season_id
+    LEFT JOIN (
+        SELECT crop_id, COUNT(*) AS planting_count
+        FROM plantings
+        WHERE is_deleted = FALSE
+        GROUP BY crop_id
+    ) pl ON pl.crop_id = c.crop_id
+    {$whereSql}
+    ORDER BY c.crop_name ASC
+    LIMIT {$perPage} OFFSET {$offset}
+";
+$stmt = $pdo->prepare($query);
+$stmt->execute($params);
+$crops = $stmt->fetchAll(PDO::FETCH_ASSOC);
 ?>
-<!DOCTYPE html>
-<html lang="en">
-<head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Crops – Agriculture Information System</title>
-<style>
-  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
-  body {
-    font-family: 'Segoe UI', system-ui, sans-serif;
-    background: #f3f4f6;
-    color: #111827;
-    min-height: 100vh;
-  }
-
-  /* ── Nav ──────────────────────────────────────────────────── */
-  nav {
-    background: linear-gradient(90deg, #1a4731 0%, #2d7a4f 100%);
-    color: #fff;
-    padding: 0 24px;
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    height: 58px;
-    position: sticky; top: 0; z-index: 100;
-    box-shadow: 0 2px 10px rgba(0,0,0,.25);
-  }
-  .brand {
-    font-weight: 700;
-    font-size: 1rem;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    text-decoration: none;
-    color: #fff;
-  }
-  .brand svg { width: 26px; height: 26px; flex-shrink: 0; }
-
-  .nav-links { display: flex; gap: 4px; }
-  .nav-links a {
-    color: rgba(255,255,255,.82);
-    text-decoration: none;
-    padding: 6px 13px;
-    border-radius: 6px;
-    font-size: .88rem;
-    transition: background .15s, color .15s;
-  }
-  .nav-links a:hover { background: rgba(255,255,255,.15); color: #fff; }
-  .nav-links a.active { background: rgba(255,255,255,.18); color: #fff; font-weight: 600; }
-
-  .user-area { display: flex; align-items: center; gap: 10px; font-size: .85rem; }
-  .user-name { opacity: .9; }
-  .role-badge {
-    background: rgba(255,255,255,.22);
-    padding: 3px 10px;
-    border-radius: 999px;
-    font-size: .74rem;
-    font-weight: 700;
-    letter-spacing: .03em;
-    text-transform: uppercase;
-  }
-  .role-badge.admin { background: rgba(251,191,36,.35); color: #fef3c7; }
-  .logout-btn {
-    background: rgba(239,68,68,.75);
-    color: #fff;
-    border: none;
-    padding: 5px 13px;
-    border-radius: 6px;
-    font-size: .82rem;
-    font-weight: 600;
-    cursor: pointer;
-    text-decoration: none;
-    transition: background .15s;
-  }
-  .logout-btn:hover { background: #dc2626; }
-
-  /* ── Page ─────────────────────────────────────────────────── */
-  .page { max-width: 1140px; margin: 0 auto; padding: 32px 20px 48px; }
-
-  .page-title {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    margin-bottom: 24px;
-    flex-wrap: wrap;
-    gap: 12px;
-  }
-  .page-title-left { display: flex; flex-direction: column; gap: 4px; }
-  .page-title h1 { font-size: 1.45rem; color: #1a4731; font-weight: 700; }
-  .back-link {
-    font-size: .82rem;
-    color: #2d7a4f;
-    text-decoration: none;
-    display: inline-flex;
-    align-items: center;
-    gap: 4px;
-  }
-  .back-link:hover { text-decoration: underline; }
-
-  /* ── Flash alert ─────────────────────────────────────────── */
-  .flash-alert {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    background: #f0fdf4;
-    border: 1px solid #86efac;
-    color: #15803d;
-    border-radius: 10px;
-    padding: 12px 16px;
-    margin-bottom: 20px;
-    font-size: .9rem;
-    font-weight: 500;
-  }
-  .flash-alert svg { width: 18px; height: 18px; flex-shrink: 0; }
-
-  /* ── Buttons ─────────────────────────────────────────────── */
-  .btn-primary {
-    background: #2d7a4f;
-    color: #fff;
-    border: none;
-    padding: 8px 18px;
-    border-radius: 8px;
-    font-size: .88rem;
-    font-weight: 600;
-    cursor: pointer;
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    transition: background .15s;
-    text-decoration: none;
-  }
-  .btn-primary:hover { background: #1a4731; }
-
-  .btn-edit {
-    background: #eff6ff;
-    color: #1d4ed8;
-    border: 1px solid #bfdbfe;
-    padding: 4px 10px;
-    border-radius: 6px;
-    font-size: .78rem;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background .13s;
-  }
-  .btn-edit:hover { background: #dbeafe; }
-
-  .btn-delete {
-    background: #fff1f2;
-    color: #be123c;
-    border: 1px solid #fecdd3;
-    padding: 4px 10px;
-    border-radius: 6px;
-    font-size: .78rem;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background .13s;
-  }
-  .btn-delete:hover { background: #ffe4e6; }
-
-  /* ── Section block / Table ────────────────────────────────── */
-  .section-block {
-    background: #fff;
-    border-radius: 14px;
-    box-shadow: 0 1px 6px rgba(0,0,0,.07);
-    overflow: hidden;
-    margin-bottom: 32px;
-  }
-  .block-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 16px 20px;
-    border-bottom: 1px solid #f3f4f6;
-  }
-  .block-header h3 { font-size: 1rem; font-weight: 700; color: #1a4731; }
-
-  table { width: 100%; border-collapse: collapse; font-size: .87rem; }
-  thead { background: #f9fafb; }
-  thead th {
-    padding: 11px 16px;
-    text-align: left;
-    font-size: .78rem;
-    font-weight: 700;
-    color: #6b7280;
-    text-transform: uppercase;
-    letter-spacing: .05em;
-    white-space: nowrap;
-    border-bottom: 1px solid #e5e7eb;
-  }
-  tbody tr { border-bottom: 1px solid #f3f4f6; transition: background .12s; }
-  tbody tr:last-child { border-bottom: none; }
-  tbody tr:hover { background: #f9fafb; }
-  td { padding: 11px 16px; vertical-align: middle; }
-
-  .ts { color: #9ca3af; font-size: .78rem; white-space: nowrap; }
-  .actions { display: flex; gap: 6px; }
-
-  .empty-state {
-    text-align: center;
-    padding: 48px 24px;
-    color: #9ca3af;
-  }
-  .empty-state svg { width: 40px; height: 40px; margin-bottom: 10px; opacity: .4; }
-  .empty-state p { font-size: .92rem; }
-
-  /* ── Modal ────────────────────────────────────────────────── */
-  .modal-overlay {
-    display: none;
-    position: fixed;
-    inset: 0;
-    background: rgba(0,0,0,.45);
-    z-index: 200;
-    align-items: center;
-    justify-content: center;
-    padding: 20px;
-  }
-  .modal-overlay.open { display: flex; }
-
-  .modal {
-    background: #fff;
-    border-radius: 16px;
-    width: 100%;
-    max-width: 480px;
-    box-shadow: 0 8px 40px rgba(0,0,0,.18);
-    overflow: hidden;
-    animation: modalIn .2s ease;
-  }
-  @keyframes modalIn {
-    from { transform: translateY(14px); opacity: 0; }
-    to   { transform: translateY(0);    opacity: 1; }
-  }
-  .modal-header {
-    display: flex;
-    align-items: center;
-    justify-content: space-between;
-    padding: 18px 22px;
-    border-bottom: 1px solid #e5e7eb;
-  }
-  .modal-header h2 { font-size: 1.05rem; font-weight: 700; color: #1a4731; }
-  .modal-close {
-    background: none;
-    border: none;
-    cursor: pointer;
-    color: #9ca3af;
-    font-size: 1.3rem;
-    line-height: 1;
-    padding: 2px 6px;
-    border-radius: 4px;
-    transition: color .13s, background .13s;
-  }
-  .modal-close:hover { color: #111827; background: #f3f4f6; }
-
-  .modal-body { padding: 22px; display: flex; flex-direction: column; gap: 16px; }
-
-  .form-group { display: flex; flex-direction: column; gap: 5px; }
-  .form-group label {
-    font-size: .82rem;
-    font-weight: 600;
-    color: #374151;
-  }
-  .form-group input,
-  .form-group select {
-    border: 1.5px solid #d1d5db;
-    border-radius: 8px;
-    padding: 8px 12px;
-    font-size: .9rem;
-    font-family: inherit;
-    color: #111827;
-    transition: border-color .15s, box-shadow .15s;
-    outline: none;
-    background: #fff;
-  }
-  .form-group input:focus,
-  .form-group select:focus {
-    border-color: #2d7a4f;
-    box-shadow: 0 0 0 3px rgba(45,122,79,.12);
-  }
-
-  .modal-footer {
-    padding: 14px 22px;
-    border-top: 1px solid #f3f4f6;
-    display: flex;
-    justify-content: flex-end;
-    gap: 10px;
-  }
-  .btn-cancel {
-    background: #f3f4f6;
-    color: #374151;
-    border: 1px solid #e5e7eb;
-    padding: 8px 18px;
-    border-radius: 8px;
-    font-size: .88rem;
-    font-weight: 600;
-    cursor: pointer;
-    transition: background .13s;
-  }
-  .btn-cancel:hover { background: #e5e7eb; }
-
-  /* ── Toast ────────────────────────────────────────────────── */
-  #toast {
-    position: fixed;
-    bottom: 24px; right: 24px;
-    min-width: 240px;
-    padding: 12px 18px;
-    border-radius: 10px;
-    font-size: .88rem;
-    font-weight: 600;
-    color: #fff;
-    box-shadow: 0 4px 20px rgba(0,0,0,.18);
-    opacity: 0;
-    transform: translateY(10px);
-    transition: opacity .25s, transform .25s;
-    pointer-events: none;
-    z-index: 999;
-  }
-  #toast.show { opacity: 1; transform: translateY(0); }
-  #toast.success { background: #16a34a; }
-  #toast.error   { background: #dc2626; }
-
-  @media (max-width: 600px) {
-    .nav-links { display: none; }
-  }
-</style>
-</head>
-<body>
-
-<!-- ── Navbar ──────────────────────────────────────────────── -->
-<nav>
-  <a class="brand" href="index.php">
-    <svg viewBox="0 0 24 24" fill="none" stroke="#fff" stroke-width="2"
-         stroke-linecap="round" stroke-linejoin="round">
-      <path d="M12 20v-8"/>
-      <path d="M12 12C12 12 8 10 8 6c0 0 4 1 4 6z" fill="rgba(255,255,255,.4)"/>
-      <path d="M12 12c0 0 4-2 4-6 0 0-4 1-4 6z" fill="rgba(255,255,255,.75)"/>
-    </svg>
-    Agriculture IS
-  </a>
-
-  <div class="nav-links">
-    <a href="index.php">Dashboard</a>
-    <a href="farmers.php">Farmers</a>
-    <a href="farms.php">Farms</a>
-    <a href="crops.php" class="active">Crops</a>
-    <a href="plantings.php">Plantings</a>
-    <a href="harvests.php">Harvests</a>
-    <?php if (isAdmin()): ?>
-      <a href="requests.php">Approval Queue</a>
-    <?php endif; ?>
+<div class="page-header">
+  <div class="page-header-title">
+    <h1>Crops</h1>
+    <span class="page-header-subtitle">Standard crop master list, botanical varieties, maturation durations, and seasonal recommendations</span>
   </div>
-
-  <div class="user-area">
-    <span class="user-name"><?= htmlspecialchars($user['username']) ?></span>
-    <span class="role-badge <?= isAdmin() ? 'admin' : '' ?>">
-      <?= htmlspecialchars($roleName) ?>
-    </span>
-    <a href="logout.php" class="logout-btn">Logout</a>
-  </div>
-</nav>
-
-<!-- ── Page body ───────────────────────────────────────────── -->
-<div class="page">
-
-  <!-- Page title + back link + Add button -->
-  <div class="page-title">
-    <div class="page-title-left">
-      <h1>Crops</h1>
-      <a href="index.php" class="back-link">
-        ← Back to Dashboard
-      </a>
-    </div>
-    <button class="btn-primary" onclick="openModal('addModal')">
-      <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor"
-           stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
-        <line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/>
-      </svg>
-      Add New Crop
+  <div class="page-header-actions">
+    <button type="button" class="btn btn-primary" onclick="openCreateCropModal()">
+      + Add New Crop
     </button>
   </div>
+</div>
 
-  <!-- Flash alert -->
-  <?php if ($flashMsg !== ''): ?>
-  <div class="flash-alert">
-    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"
-         stroke-linecap="round" stroke-linejoin="round">
-      <path d="M22 11.08V12a10 10 0 1 1-5.93-9.14"/>
-      <polyline points="22 4 12 14.01 9 11.01"/>
-    </svg>
-    <?= htmlspecialchars($flashMsg) ?>
+<?php if ($msg !== ''): ?>
+<div class="card" style="border-left:4px solid <?= $msgType === 'success' ? 'var(--success)' : 'var(--danger)' ?>; padding:0.9rem 1.25rem;">
+  <strong style="color:<?= $msgType === 'success' ? 'var(--success)' : 'var(--danger)' ?>;">
+    <?= $msgType === 'success' ? '✓ ' : '⚠ ' ?><?= e($msg) ?>
+  </strong>
+</div>
+<?php endif; ?>
+
+<!-- Filter Toolbar -->
+<div class="toolbar">
+  <form method="GET" action="crops.php" data-pjax class="toolbar-group" style="flex:1;">
+    <div class="search-box">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg>
+      <input type="text" name="search" placeholder="Search by crop name or variety..." value="<?= e($search) ?>">
+    </div>
+
+    <select name="cat_id" class="form-control" style="width:auto; min-width:140px;" data-no-enhance onchange="this.form.submit()">
+      <option value="">-- Category --</option>
+      <?php foreach ($activeCategories as $cat): ?>
+      <option value="<?= (int)$cat['category_id'] ?>" <?= $filterCat === (int)$cat['category_id'] ? 'selected' : '' ?>>
+        <?= e($cat['description']) ?>
+      </option>
+      <?php endforeach; ?>
+    </select>
+
+    <select name="season_id" class="form-control" style="width:auto; min-width:140px;" data-no-enhance onchange="this.form.submit()">
+      <option value="">-- Season --</option>
+      <?php foreach ($activeSeasons as $seas): ?>
+      <option value="<?= (int)$seas['season_id'] ?>" <?= $filterSeas === (int)$seas['season_id'] ? 'selected' : '' ?>>
+        <?= e($seas['description']) ?>
+      </option>
+      <?php endforeach; ?>
+    </select>
+
+    <button type="submit" class="btn btn-secondary btn-sm">Filter</button>
+    <?php if ($search !== '' || $filterCat || $filterSeas): ?>
+    <a href="crops.php" class="btn btn-secondary btn-sm">Reset</a>
+    <?php endif; ?>
+  </form>
+
+  <div class="toolbar-group">
+    <span style="font-size:0.84rem; color:var(--text-muted); font-weight:500;">
+      Total: <strong><?= number_format($totalRecords) ?></strong> Crops
+    </span>
+  </div>
+</div>
+
+<!-- Crops Data Table -->
+<div class="card">
+  <div class="table-responsive">
+    <table class="data-table">
+      <thead>
+        <tr>
+          <th style="width:70px;">ID</th>
+          <th>Crop Name</th>
+          <th>Variety</th>
+          <th>Category</th>
+          <th>Growing Period</th>
+          <th>Recommended Season</th>
+          <th>Active Plantings</th>
+          <th style="text-align:right;">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        <?php if (empty($crops)): ?>
+        <tr>
+          <td colspan="8" class="empty-state">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 2a10 10 0 0 0-10 10c0 4.42 2.87 8.17 6.84 9.5.5.08.66-.23.66-.5v-1.69c-2.77.6-3.36-1.34-3.36-1.34"/></svg>
+            <h3>No crops found</h3>
+            <p><?= $search !== '' || $filterCat || $filterSeas ? 'No matching crops found. Try clearing your filters.' : 'Add your first crop entry to start tracking farm cultivation.' ?></p>
+            <?php if ($search === '' && !$filterCat && !$filterSeas): ?>
+            <button type="button" class="btn btn-primary btn-sm" onclick="openCreateCropModal()">+ Add Crop</button>
+            <?php endif; ?>
+          </td>
+        </tr>
+        <?php else: ?>
+        <?php foreach ($crops as $c): ?>
+        <tr>
+          <td style="font-family:monospace; font-size:0.8rem; color:var(--text-muted);">
+            #<?= (int)$c['crop_id'] ?>
+          </td>
+          <td>
+            <strong><?= e($c['crop_name']) ?></strong>
+          </td>
+          <td style="font-size:0.85rem;">
+            <?= e($c['variety'] ?: 'Standard / Native') ?>
+          </td>
+          <td>
+            <span class="badge" style="background:#E0F2FE; color:#0369A1; border:1px solid #BAE6FD; font-weight:600;">
+              <?= e($c['category_name'] ?: 'Uncategorized') ?>
+            </span>
+          </td>
+          <td style="font-size:0.85rem;">
+            <?= $c['growing_days'] ? (int)$c['growing_days'] . ' days' : '—' ?>
+          </td>
+          <td style="font-size:0.85rem;">
+            <?= e($c['season_name'] ?: 'All-Year') ?>
+          </td>
+          <td>
+            <?php if ((int)$c['active_plantings'] > 0): ?>
+            <span class="badge" style="background:#E9F5EE; color:#1B4332; border:1px solid #DCE4DF; font-weight:600;">
+              <?= (int)$c['active_plantings'] ?> active
+            </span>
+            <?php else: ?>
+            <span style="color:var(--text-light); font-size:0.82rem;">None active</span>
+            <?php endif; ?>
+          </td>
+          <td style="text-align:right;">
+            <div style="display:inline-flex; align-items:center; gap:0.35rem;">
+              <button type="button" class="btn btn-secondary btn-sm"
+                      onclick='openEditCropModal(<?= (int)$c['crop_id'] ?>, <?= json_encode($c['crop_name']) ?>, <?= json_encode($c['variety']) ?>, <?= (int)($c['category_id'] ?? 0) ?>, <?= (int)($c['growing_days'] ?? 0) ?>, <?= (int)($c['season_id'] ?? 0) ?>)'>
+                Edit
+              </button>
+
+              <?php if (isAdmin()): ?>
+              <form method="POST" action="crops.php" data-confirm-delete data-record-name="<?= e($c['crop_name']) ?>" style="display:inline;">
+                <input type="hidden" name="action" value="soft_delete">
+                <input type="hidden" name="crop_id" value="<?= (int)$c['crop_id'] ?>">
+                <button type="submit" class="btn btn-secondary btn-sm" style="color:var(--danger); border-color:var(--danger-border);">
+                  Delete
+                </button>
+              </form>
+              <?php endif; ?>
+            </div>
+          </td>
+        </tr>
+        <?php endforeach; ?>
+        <?php endif; ?>
+      </tbody>
+    </table>
+  </div>
+
+  <!-- Pagination -->
+  <?php if ($totalPages > 1): ?>
+  <div class="pagination-wrap">
+    <div class="pagination-info">
+      Showing <?= $offset + 1 ?> to <?= min($offset + $perPage, $totalRecords) ?> of <?= number_format($totalRecords) ?> crops
+    </div>
+    <ul class="pagination">
+      <?php
+        $baseParams = $_GET;
+        $prevUrl = '?page=' . ($page - 1) . '&' . http_build_query(array_diff_key($baseParams, ['page' => '']));
+        $nextUrl = '?page=' . ($page + 1) . '&' . http_build_query(array_diff_key($baseParams, ['page' => '']));
+      ?>
+      <li class="page-item <?= ($page <= 1) ? 'disabled' : '' ?>">
+        <a href="<?= e($prevUrl) ?>" class="page-link" data-pjax>« Prev</a>
+      </li>
+      <?php for ($p = max(1, $page - 2); $p <= min($totalPages, $page + 2); $p++): ?>
+      <li class="page-item <?= ($p === $page) ? 'active' : '' ?>">
+        <a href="?page=<?= $p ?>&<?= http_build_query(array_diff_key($baseParams, ['page' => ''])) ?>" class="page-link" data-pjax><?= $p ?></a>
+      </li>
+      <?php endfor; ?>
+      <li class="page-item <?= ($page >= $totalPages) ? 'disabled' : '' ?>">
+        <a href="<?= e($nextUrl) ?>" class="page-link" data-pjax>Next »</a>
+      </li>
+    </ul>
   </div>
   <?php endif; ?>
+</div>
 
-  <!-- Data table -->
-  <div class="section-block">
-    <div class="block-header">
-      <h3>All Crops (<?= count($crops) ?>)</h3>
+<!-- Modal: Add Crop -->
+<div id="modal-create-crop" class="sp-modal-backdrop" role="dialog" aria-modal="true">
+  <div class="sp-modal-dialog">
+    <div class="sp-modal-header">
+      <h3 class="sp-modal-title">Add New Crop</h3>
+      <button type="button" class="sp-modal-close" onclick="closeModal('modal-create-crop')">&times;</button>
     </div>
+    <form method="POST" action="crops.php" data-pjax autocomplete="off">
+      <input type="hidden" name="action" value="create">
 
-    <?php if (empty($crops)): ?>
-      <div class="empty-state">
-        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
-          <path d="M12 22V12"/><path d="M5 12H2a10 10 0 0 0 20 0h-3"/>
-          <path d="M12 12C12 7 8 4 8 4s0 5 4 8z"/><path d="M12 12c0-5 4-8 4-8s0 5-4 8z"/>
-        </svg>
-        <p>No crops found. Add your first crop!</p>
-      </div>
-    <?php else: ?>
-      <table>
-        <thead>
-          <tr>
-            <th>#</th>
-            <th>Crop Name</th>
-            <th>Category</th>
-            <th>Growing Days</th>
-            <th>Price/kg (₱)</th>
-            <th>Registered</th>
-            <th>Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          <?php foreach ($crops as $i => $crop): ?>
-          <tr>
-            <td><?= $i + 1 ?></td>
-            <td><strong><?= htmlspecialchars($crop['crop_name']) ?></strong></td>
-            <td><?= htmlspecialchars($crop['category'] ?? '—') ?></td>
-            <td><?= $crop['growing_days'] !== null ? (int)$crop['growing_days'] . ' days' : '—' ?></td>
-            <td><?= $crop['selling_price_per_kg'] !== null ? '₱ ' . number_format((float)$crop['selling_price_per_kg'], 2) : '—' ?></td>
-            <td class="ts"><?= htmlspecialchars(date('M d, Y', strtotime($crop['created_at']))) ?></td>
-            <td>
-              <div class="actions">
-                <button class="btn-edit"
-                  onclick="openEdit(
-                    <?= (int)$crop['crop_id'] ?>,
-                    <?= htmlspecialchars(json_encode($crop['crop_name']), ENT_QUOTES) ?>,
-                    <?= (int)($crop['category_id'] ?? 0) ?>,
-                    <?= (int)($crop['growing_days'] ?? 0) ?>,
-                    <?= htmlspecialchars(json_encode($crop['selling_price_per_kg']), ENT_QUOTES) ?>
-                  )">Edit</button>
-                <button class="btn-delete"
-                  onclick="confirmDelete(<?= (int)$crop['crop_id'] ?>, <?= htmlspecialchars(json_encode($crop['crop_name']), ENT_QUOTES) ?>)">Delete</button>
-              </div>
-            </td>
-          </tr>
-          <?php endforeach; ?>
-        </tbody>
-      </table>
-    <?php endif; ?>
-  </div>
+      <div class="sp-modal-body">
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label" for="add_crop_name">Crop Name <span style="color:var(--danger)">*</span></label>
+            <input type="text" id="add_crop_name" name="crop_name" class="form-control" placeholder="e.g. Rice, Corn, Tomato" required maxlength="150">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="add_variety">Variety / Hybrid</label>
+            <input type="text" id="add_variety" name="variety" class="form-control" placeholder="e.g. RC 222, Sweet Corn" maxlength="100">
+          </div>
+        </div>
 
-</div><!-- /page -->
-
-<!-- ═══════════════════════════════════════════
-     ADD MODAL
-════════════════════════════════════════════════ -->
-<div class="modal-overlay" id="addModal">
-  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="addModalTitle">
-    <div class="modal-header">
-      <h2 id="addModalTitle">Add New Crop</h2>
-      <button class="modal-close" onclick="closeModal('addModal')" aria-label="Close">&times;</button>
-    </div>
-    <form method="POST" action="crops.php">
-      <input type="hidden" name="action" value="add">
-      <div class="modal-body">
-
-        <div class="form-group">
-          <label for="add_crop_name">Crop Name <span style="color:#ef4444">*</span></label>
-          <input type="text" id="add_crop_name" name="crop_name" required
-                 placeholder="e.g. Rice, Corn, Tomato">
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label" for="add_category">Category</label>
+            <select id="add_category" name="category_id" class="form-control">
+              <option value="">-- Select Category --</option>
+              <?php foreach ($activeCategories as $cat): ?>
+              <option value="<?= (int)$cat['category_id'] ?>"><?= e($cat['description']) ?></option>
+              <?php endforeach; ?>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="add_days">Growing Period (Days)</label>
+            <input type="number" id="add_days" name="growing_days" class="form-control" min="1" placeholder="e.g. 115">
+          </div>
         </div>
 
         <div class="form-group">
-          <label for="add_category_id">Category</label>
-          <select id="add_category_id" name="category_id">
-            <option value="">— Select category —</option>
-            <?php foreach ($categories as $cat): ?>
-              <option value="<?= (int)$cat['category_id'] ?>">
-                <?= htmlspecialchars($cat['description']) ?>
-              </option>
+          <label class="form-label" for="add_season">Recommended Season</label>
+          <select id="add_season" name="season_id" class="form-control">
+            <option value="">-- Select Season --</option>
+            <?php foreach ($activeSeasons as $seas): ?>
+            <option value="<?= (int)$seas['season_id'] ?>"><?= e($seas['description']) ?></option>
             <?php endforeach; ?>
           </select>
         </div>
-
-        <div class="form-group">
-          <label for="add_growing_days">Growing Days</label>
-          <input type="number" id="add_growing_days" name="growing_days" min="1"
-                 placeholder="e.g. 90">
-        </div>
-
-        <div class="form-group">
-          <label for="add_selling_price">Selling Price per kg (₱)</label>
-          <input type="number" id="add_selling_price" name="selling_price_per_kg"
-                 min="0" step="0.01" placeholder="e.g. 25.00">
-        </div>
-
       </div>
-      <div class="modal-footer">
-        <button type="button" class="btn-cancel" onclick="closeModal('addModal')">Cancel</button>
-        <button type="submit" class="btn-primary">Save Crop</button>
+
+      <div class="sp-modal-footer">
+        <button type="button" class="btn btn-secondary" onclick="closeModal('modal-create-crop')">Cancel</button>
+        <button type="submit" class="btn btn-primary">Save Crop</button>
       </div>
     </form>
   </div>
 </div>
 
-<!-- ═══════════════════════════════════════════
-     EDIT MODAL
-════════════════════════════════════════════════ -->
-<div class="modal-overlay" id="editModal">
-  <div class="modal" role="dialog" aria-modal="true" aria-labelledby="editModalTitle">
-    <div class="modal-header">
-      <h2 id="editModalTitle">Edit Crop</h2>
-      <button class="modal-close" onclick="closeModal('editModal')" aria-label="Close">&times;</button>
+<!-- Modal: Edit Crop -->
+<div id="modal-edit-crop" class="sp-modal-backdrop" role="dialog" aria-modal="true">
+  <div class="sp-modal-dialog">
+    <div class="sp-modal-header">
+      <h3 class="sp-modal-title">Edit Crop</h3>
+      <button type="button" class="sp-modal-close" onclick="closeModal('modal-edit-crop')">&times;</button>
     </div>
-    <form method="POST" action="crops.php">
-      <input type="hidden" name="action" value="edit">
-      <input type="hidden" name="crop_id" id="edit_crop_id">
-      <div class="modal-body">
+    <form method="POST" action="crops.php" data-pjax autocomplete="off">
+      <input type="hidden" name="action" value="update">
+      <input type="hidden" id="edit_crop_id" name="crop_id" value="">
 
-        <div class="form-group">
-          <label for="edit_crop_name">Crop Name <span style="color:#ef4444">*</span></label>
-          <input type="text" id="edit_crop_name" name="crop_name" required>
+      <div class="sp-modal-body">
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label" for="edit_crop_name">Crop Name <span style="color:var(--danger)">*</span></label>
+            <input type="text" id="edit_crop_name" name="crop_name" class="form-control" required maxlength="150">
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="edit_variety">Variety / Hybrid</label>
+            <input type="text" id="edit_variety" name="variety" class="form-control" maxlength="100">
+          </div>
+        </div>
+
+        <div class="form-grid">
+          <div class="form-group">
+            <label class="form-label" for="edit_category">Category</label>
+            <select id="edit_category" name="category_id" class="form-control">
+              <option value="">-- Select Category --</option>
+              <?php foreach ($activeCategories as $cat): ?>
+              <option value="<?= (int)$cat['category_id'] ?>"><?= e($cat['description']) ?></option>
+              <?php endforeach; ?>
+            </select>
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="edit_days">Growing Period (Days)</label>
+            <input type="number" id="edit_days" name="growing_days" class="form-control" min="1">
+          </div>
         </div>
 
         <div class="form-group">
-          <label for="edit_category_id">Category</label>
-          <select id="edit_category_id" name="category_id">
-            <option value="">— Select category —</option>
-            <?php foreach ($categories as $cat): ?>
-              <option value="<?= (int)$cat['category_id'] ?>">
-                <?= htmlspecialchars($cat['description']) ?>
-              </option>
+          <label class="form-label" for="edit_season">Recommended Season</label>
+          <select id="edit_season" name="season_id" class="form-control">
+            <option value="">-- Select Season --</option>
+            <?php foreach ($activeSeasons as $seas): ?>
+            <option value="<?= (int)$seas['season_id'] ?>"><?= e($seas['description']) ?></option>
             <?php endforeach; ?>
           </select>
         </div>
-
-        <div class="form-group">
-          <label for="edit_growing_days">Growing Days</label>
-          <input type="number" id="edit_growing_days" name="growing_days" min="1">
-        </div>
-
-        <div class="form-group">
-          <label for="edit_selling_price">Selling Price per kg (₱)</label>
-          <input type="number" id="edit_selling_price" name="selling_price_per_kg"
-                 min="0" step="0.01">
-        </div>
-
-        <?php if (isStaff()): ?>
-        <p style="font-size:.8rem;color:#6b7280;background:#fefce8;border:1px solid #fde68a;border-radius:8px;padding:10px 12px;">
-          ⚠ As Staff, your edit will be submitted for Admin approval.
-        </p>
-        <?php endif; ?>
-
       </div>
-      <div class="modal-footer">
-        <button type="button" class="btn-cancel" onclick="closeModal('editModal')">Cancel</button>
-        <button type="submit" class="btn-primary">
-          <?= isStaff() ? 'Submit Request' : 'Update Crop' ?>
-        </button>
+
+      <div class="sp-modal-footer">
+        <button type="button" class="btn btn-secondary" onclick="closeModal('modal-edit-crop')">Cancel</button>
+        <button type="submit" class="btn btn-primary">Update Crop</button>
       </div>
     </form>
   </div>
 </div>
-
-<!-- Hidden delete form -->
-<form id="deleteForm" method="POST" action="crops.php" style="display:none">
-  <input type="hidden" name="action" value="delete">
-  <input type="hidden" name="crop_id" id="delete_crop_id">
-</form>
-
-<!-- ── Toast ─────────────────────────────────────────────────── -->
-<div id="toast"></div>
 
 <script>
-/* ── Modal helpers ──────────────────────────────────────────── */
-function openModal(id) {
-  document.getElementById(id).classList.add('open');
-  document.body.style.overflow = 'hidden';
-}
-function closeModal(id) {
-  document.getElementById(id).classList.remove('open');
-  document.body.style.overflow = '';
-}
-// Close on overlay click
-document.querySelectorAll('.modal-overlay').forEach(overlay => {
-  overlay.addEventListener('click', e => {
-    if (e.target === overlay) closeModal(overlay.id);
-  });
-});
-// Close on Escape
-document.addEventListener('keydown', e => {
-  if (e.key === 'Escape') {
-    document.querySelectorAll('.modal-overlay.open').forEach(o => closeModal(o.id));
+  function openCreateCropModal() {
+    if (typeof openModal === 'function') {
+      openModal('modal-create-crop');
+    } else {
+      document.getElementById('modal-create-crop').classList.add('open');
+    }
   }
-});
-
-/* ── Open edit modal pre-filled ─────────────────────────────── */
-function openEdit(id, name, categoryId, days, price) {
-  document.getElementById('edit_crop_id').value      = id;
-  document.getElementById('edit_crop_name').value    = name;
-  document.getElementById('edit_growing_days').value = days || '';
-  document.getElementById('edit_selling_price').value = price !== null ? price : '';
-
-  const catSel = document.getElementById('edit_category_id');
-  catSel.value = categoryId || '';
-
-  openModal('editModal');
-}
-
-/* ── Delete confirmation ─────────────────────────────────────── */
-function confirmDelete(id, name) {
-  <?php if (isStaff()): ?>
-  const msg = 'Submit a DELETE request for "' + name + '" for Admin approval?';
-  <?php else: ?>
-  const msg = 'Permanently delete crop "' + name + '"? This cannot be undone.';
-  <?php endif; ?>
-  if (!confirm(msg)) return;
-  document.getElementById('delete_crop_id').value = id;
-  document.getElementById('deleteForm').submit();
-}
-
-/* ── Toast helper ───────────────────────────────────────────── */
-const toast = document.getElementById('toast');
-let toastTimer;
-function showToast(msg, type = 'success') {
-  clearTimeout(toastTimer);
-  toast.textContent = msg;
-  toast.className   = 'show ' + type;
-  toastTimer = setTimeout(() => { toast.className = ''; }, 4000);
-}
-
-/* ── Show flash message as toast ────────────────────────────── */
-<?php if ($flashMsg !== ''): ?>
-showToast(<?= json_encode($flashMsg) ?>, 'success');
-<?php endif; ?>
+  function openEditCropModal(id, name, variety, catId, days, seasonId) {
+    document.getElementById('edit_crop_id').value = id;
+    document.getElementById('edit_crop_name').value = name;
+    document.getElementById('edit_variety').value = variety || '';
+    document.getElementById('edit_category').value = catId || '';
+    document.getElementById('edit_days').value = days || '';
+    document.getElementById('edit_season').value = seasonId || '';
+    if (typeof openModal === 'function') {
+      openModal('modal-edit-crop');
+    } else {
+      document.getElementById('modal-edit-crop').classList.add('open');
+    }
+  }
+  function closeModal(id) {
+    const el = document.getElementById(id);
+    if (el) el.classList.remove('open');
+  }
 </script>
-</body>
-</html>
+
+<?php require_once __DIR__ . '/includes/footer.php'; ?>

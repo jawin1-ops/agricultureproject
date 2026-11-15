@@ -1,0 +1,23 @@
+# ============================================================
+#  .gitignore  –  Sproutly Agriculture IS
+# ============================================================
+
+# --- DANGER: destructive installer – never deploy to web root ---
+install.php
+
+# --- Environment / credentials ---
+.env
+.env.*
+config/database.php
+
+# --- PHP dependencies ---
+vendor/
+
+# --- Editor & OS artefacts ---
+.vscode/
+.idea/
+*.DS_Store
+Thumbs.db
+
+# --- Logs ---
+*.log

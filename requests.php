@@ -40,15 +40,15 @@ $pendingRequests = $stmt->fetchAll();
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
   body {
-    font-family: 'Segoe UI', system-ui, sans-serif;
-    background: #f3f4f6;
-    color: #111827;
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    background: #F8F9F6;
+    color: #18221D;
     min-height: 100vh;
   }
 
   /* ── Nav ── */
   nav {
-    background: #1a4731;
+    background: #1B4332;
     color: #fff;
     padding: 0 24px;
     display: flex;
@@ -58,28 +58,30 @@ $pendingRequests = $stmt->fetchAll();
     position: sticky; top: 0; z-index: 100;
     box-shadow: 0 2px 8px rgba(0,0,0,.2);
   }
-  nav .brand { font-weight: 700; font-size: 1rem; display: flex; align-items: center; gap: 8px; }
+  nav .brand { font-weight: 700; font-size: 1rem; display: flex; align-items: center; gap: 8px; color: #fff; }
   nav .brand svg { width: 24px; height: 24px; }
   nav .nav-links { display: flex; gap: 4px; }
   nav .nav-links a {
-    color: rgba(255,255,255,.8);
+    color: rgba(255,255,255,.85);
     text-decoration: none;
     padding: 6px 12px;
-    border-radius: 6px;
+    border-radius: 999px;
     font-size: .88rem;
     transition: background .15s;
   }
-  nav .nav-links a:hover, nav .nav-links a.active { background: rgba(255,255,255,.15); color: #fff; }
+  nav .nav-links a:hover { background: rgba(255,255,255,.14); color: #fff; }
+  nav .nav-links a.active { background: #E9F5EE; color: #1B4332; font-weight: 600; }
   nav .user-info { display: flex; align-items: center; gap: 12px; font-size: .85rem; }
   nav .role-badge {
-    background: rgba(255,255,255,.2);
+    background: #E9F5EE;
+    color: #1B4332;
     padding: 2px 8px;
     border-radius: 999px;
     font-size: .75rem;
     font-weight: 600;
   }
   nav .logout-btn {
-    background: rgba(239,68,68,.8);
+    background: #DC2626;
     color: #fff;
     border: none;
     padding: 5px 12px;
@@ -87,8 +89,9 @@ $pendingRequests = $stmt->fetchAll();
     font-size: .82rem;
     cursor: pointer;
     text-decoration: none;
+    font-weight: 600;
   }
-  nav .logout-btn:hover { background: #dc2626; }
+  nav .logout-btn:hover { background: #B91C1C; }
 
   /* ── Page ── */
   .page { max-width: 1100px; margin: 0 auto; padding: 32px 20px; }
@@ -101,9 +104,9 @@ $pendingRequests = $stmt->fetchAll();
     flex-wrap: wrap;
     gap: 12px;
   }
-  .page-header h2 { font-size: 1.4rem; color: #1a4731; display: flex; align-items: center; gap: 8px; }
+  .page-header h2 { font-size: 1.4rem; color: #1B4332; display: flex; align-items: center; gap: 8px; }
   .badge-count {
-    background: #ef4444;
+    background: #D97706;
     color: #fff;
     font-size: .78rem;
     font-weight: 700;
@@ -119,19 +122,20 @@ $pendingRequests = $stmt->fetchAll();
     display: none;
   }
   .alert.show { display: block; }
-  .alert.success { background: #f0fdf4; color: #15803d; border: 1px solid #bbf7d0; }
-  .alert.error   { background: #fef2f2; color: #b91c1c; border: 1px solid #fecaca; }
+  .alert.success { background: #DCFCE7; color: #15803D; border: 1px solid #BBF7D0; }
+  .alert.error   { background: #FEE2E2; color: #DC2626; border: 1px solid #FECACA; }
 
   /* ── Table ── */
   .table-wrap {
     background: #fff;
     border-radius: 12px;
-    box-shadow: 0 1px 4px rgba(0,0,0,.08);
+    border: 1px solid #DCE4DF;
+    box-shadow: 0 1px 4px rgba(0,0,0,.06);
     overflow: hidden;
   }
 
   table { width: 100%; border-collapse: collapse; font-size: .88rem; }
-  thead { background: #1a4731; color: #fff; }
+  thead { background: #1B4332; color: #fff; }
   thead th {
     padding: 13px 16px;
     text-align: left;
@@ -141,9 +145,9 @@ $pendingRequests = $stmt->fetchAll();
     letter-spacing: .05em;
     white-space: nowrap;
   }
-  tbody tr { border-bottom: 1px solid #f3f4f6; transition: background .15s; }
+  tbody tr { border-bottom: 1px solid #DCE4DF; transition: background .15s; }
   tbody tr:last-child { border-bottom: none; }
-  tbody tr:hover { background: #f9fafb; }
+  tbody tr:hover { background: #E9F5EE; }
   td { padding: 12px 16px; vertical-align: top; }
 
   .tag {
@@ -153,16 +157,17 @@ $pendingRequests = $stmt->fetchAll();
     font-size: .75rem;
     font-weight: 600;
   }
-  .tag-update { background: #eff6ff; color: #1d4ed8; }
-  .tag-delete { background: #fff7ed; color: #c2410c; }
-  .tag-table  { background: #f0fdf4; color: #15803d; }
+  .tag-update { background: #E0F2FE; color: #0369A1; border: 1px solid #BAE6FD; }
+  .tag-delete { background: #FEE2E2; color: #DC2626; border: 1px solid #FECACA; }
+  .tag-table  { background: #E9F5EE; color: #1B4332; border: 1px solid #DCE4DF; }
 
   .proposed-data {
     max-width: 280px;
     font-family: monospace;
     font-size: .78rem;
-    background: #f8fafc;
-    border: 1px solid #e2e8f0;
+    background: #F8F9F6;
+    border: 1px solid #DCE4DF;
+    color: #18221D;
     border-radius: 6px;
     padding: 6px 10px;
     white-space: pre-wrap;
@@ -179,10 +184,10 @@ $pendingRequests = $stmt->fetchAll();
     cursor: pointer;
     transition: background .15s, transform .1s;
   }
-  .btn-approve { background: #22c55e; color: #fff; }
-  .btn-approve:hover  { background: #16a34a; }
-  .btn-reject  { background: #ef4444; color: #fff; }
-  .btn-reject:hover   { background: #dc2626; }
+  .btn-approve { background: #1B4332; color: #fff; }
+  .btn-approve:hover  { background: #2D6A4F; }
+  .btn-reject  { background: #DC2626; color: #fff; }
+  .btn-reject:hover   { background: #B91C1C; }
   .btn-approve:disabled, .btn-reject:disabled {
     opacity: .6; cursor: not-allowed;
   }
@@ -190,12 +195,12 @@ $pendingRequests = $stmt->fetchAll();
   .empty-state {
     text-align: center;
     padding: 60px 24px;
-    color: #6b7280;
+    color: #52635A;
   }
   .empty-state svg { width: 48px; height: 48px; margin-bottom: 12px; opacity: .4; }
   .empty-state p { font-size: 1rem; }
 
-  .ts { color: #9ca3af; font-size: .78rem; white-space: nowrap; }
+  .ts { color: #52635A; font-size: .78rem; white-space: nowrap; }
 </style>
 </head>
 <body>
@@ -270,7 +275,7 @@ $pendingRequests = $stmt->fetchAll();
             <td><?= htmlspecialchars((string)$req['record_id']) ?></td>
             <td>
               <?php if ($req['action_type'] === 'DELETE'): ?>
-                <span style="color:#9ca3af;font-size:.8rem;">—</span>
+                <span style="color:#7E8F85;font-size:.8rem;">—</span>
               <?php else: ?>
                 <div class="proposed-data"><?= htmlspecialchars(
                     json_encode(json_decode($req['proposed_data'], true), JSON_PRETTY_PRINT | JSON_UNESCAPED_UNICODE)
