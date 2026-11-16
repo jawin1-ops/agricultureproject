@@ -13,6 +13,13 @@ require_once __DIR__ . '/includes/auth.php';
 requireLogin();
 
 require_once __DIR__ . '/includes/soft_delete_guard.php';
+require_once __DIR__ . '/classes/Planting.php';
+require_once __DIR__ . '/classes/Farm.php';
+require_once __DIR__ . '/classes/Crop.php';
+
+$plantingModel = new Planting($pdo);
+$farmModel     = new Farm($pdo);
+$cropModel     = new Crop($pdo);
 
 $currentUserId = (int)currentUserId();
 $msg = '';
@@ -84,31 +91,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_SESSION['error'] = $msg;
         } else {
             try {
-                $pdo->beginTransaction();
-                $stmt = $pdo->prepare("
-                    INSERT INTO plantings
-                        (farm_id, crop_id, planting_date, area_planted_hectares, seed_quantity_kg,
-                         expected_harvest_date, status_id, is_deleted, created_at, updated_at, created_by, updated_by)
-                    VALUES
-                        (:farm_id, :crop_id, :p_date, :area, :seeds, :exp_date, :status_id,
-                         FALSE, NOW(), NOW(), :created_by, :updated_by)
-                    RETURNING planting_id
-                ");
-                $stmt->execute([
-                    ':farm_id'     => $farmId,
-                    ':crop_id'     => $cropId,
-                    ':p_date'      => $plantingDate,
-                    ':area'        => $areaPlanted > 0 ? $areaPlanted : null,
-                    ':seeds'       => $seedQty > 0 ? $seedQty : null,
-                    ':exp_date'    => $expectedDate ?: null,
-                    ':status_id'   => $statusId,
-                    ':created_by'  => $currentUserId,
-                    ':updated_by'  => $currentUserId,
-                ]);
-                $newPlantingId = (int)$stmt->fetchColumn();
-
-                $newData = [
-                    'planting_id'           => $newPlantingId,
+                $newPlantingId = $plantingModel->create([
                     'farm_id'               => $farmId,
                     'crop_id'               => $cropId,
                     'planting_date'         => $plantingDate,
@@ -116,17 +99,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'seed_quantity_kg'      => $seedQty,
                     'expected_harvest_date' => $expectedDate,
                     'status_id'             => $statusId,
-                ];
-
-                logActivity($pdo, 'CREATE', 'plantings', $newPlantingId, "Recorded new planting cycle #{$newPlantingId}", null, $newData);
-                $pdo->commit();
+                    'user_id'               => $currentUserId,
+                ]);
 
                 $_SESSION['flash_msg'] = "Planting cycle #{$newPlantingId} recorded successfully.";
                 $_SESSION['flash_type'] = 'success';
                 header('Location: plantings.php?created=1');
                 exit;
             } catch (Throwable $e) {
-                if ($pdo->inTransaction()) $pdo->rollBack();
                 error_log('Planting creation failed: ' . $e->getMessage());
                 if (strpos($e->getMessage(), '23502') !== false) {
                     $msg = 'Please fill out all mandatory planting fields.';
@@ -184,112 +164,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_SESSION['error'] = $msg;
         } else {
             try {
-                $cur = $pdo->prepare("SELECT * FROM plantings WHERE planting_id = :id AND is_deleted = FALSE");
-                $cur->execute([':id' => $plantingId]);
-                $oldRow = $cur->fetch(PDO::FETCH_ASSOC);
+                $plantingModel->update($plantingId, [
+                    'farm_id'               => $farmId,
+                    'crop_id'               => $cropId,
+                    'planting_date'         => $plantingDate,
+                    'area_planted_hectares' => $areaPlanted,
+                    'seed_quantity_kg'      => $seedQty,
+                    'expected_harvest_date' => $expectedDate,
+                    'status_id'             => $statusId,
+                    'user_id'               => $currentUserId,
+                ]);
 
-                if (!$oldRow) {
-                    $msg = 'Planting record not found or already deleted.';
-                    $msgType = 'error';
-                    $_SESSION['error'] = $msg;
-                } else {
-                    $pdo->beginTransaction();
-                    $stmt = $pdo->prepare("
-                        UPDATE plantings
-                        SET farm_id = :farm_id,
-                            crop_id = :crop_id,
-                            planting_date = :p_date,
-                            area_planted_hectares = :area,
-                            seed_quantity_kg = :seeds,
-                            expected_harvest_date = :exp_date,
-                            status_id = :status_id,
-                            updated_at = NOW(),
-                            updated_by = :updated_by
-                        WHERE planting_id = :id
-                    ");
-                    $stmt->execute([
-                        ':farm_id'     => $farmId,
-                        ':crop_id'     => $cropId,
-                        ':p_date'      => $plantingDate,
-                        ':area'        => $areaPlanted > 0 ? $areaPlanted : null,
-                        ':seeds'       => $seedQty > 0 ? $seedQty : null,
-                        ':exp_date'    => $expectedDate ?: null,
-                        ':status_id'   => $statusId,
-                        ':updated_by'  => $currentUserId,
-                        ':id'          => $plantingId,
-                    ]);
-
-                    // Bug Fix #1: When status is set to Harvested (3), auto-insert a default
-                    // harvest record if none already exists for this planting_id.
-                    if ($statusId === 3) {
-                        $existsStmt = $pdo->prepare("
-                            SELECT COUNT(*) FROM harvests
-                            WHERE planting_id = :planting_id AND COALESCE(is_deleted, FALSE) = FALSE
-                        ");
-                        $existsStmt->execute([':planting_id' => $plantingId]);
-                        $harvestExists = (int)$existsStmt->fetchColumn();
-
-                        if ($harvestExists === 0) {
-                            // Resolve the first available grade_id (Grade A) and a default remark_id
-                            $gradeStmt = $pdo->query("
-                                SELECT grade_id FROM quality_grades
-                                WHERE COALESCE(is_deleted, FALSE) = FALSE
-                                ORDER BY grade_id ASC LIMIT 1
-                            ");
-                            $defaultGradeId = $gradeStmt ? $gradeStmt->fetchColumn() : null;
-                            $defaultGradeId = $defaultGradeId ?: null;
-
-                            $remarkStmt = $pdo->query("
-                                SELECT remark_id FROM harvest_remarks
-                                WHERE COALESCE(is_deleted, FALSE) = FALSE
-                                  AND LOWER(description) LIKE '%auto%'
-                                ORDER BY remark_id ASC LIMIT 1
-                            ");
-                            $defaultRemarkId = $remarkStmt ? $remarkStmt->fetchColumn() : null;
-                            $defaultRemarkId = $defaultRemarkId ?: null;
-
-                            $insHarvest = $pdo->prepare("
-                                INSERT INTO harvests
-                                    (planting_id, harvest_date, quantity_kg, selling_price_per_kg,
-                                     grade_id, remark_id, is_deleted, created_at, updated_at,
-                                     created_by, updated_by)
-                                VALUES
-                                    (:planting_id, CURRENT_DATE, 0, 0,
-                                     :grade_id, :remark_id, FALSE, NOW(), NOW(),
-                                     :created_by, :updated_by)
-                            ");
-                            $insHarvest->execute([
-                                ':planting_id' => $plantingId,
-                                ':grade_id'    => $defaultGradeId,
-                                ':remark_id'   => $defaultRemarkId,
-                                ':created_by'  => $currentUserId,
-                                ':updated_by'  => $currentUserId,
-                            ]);
-                        }
-                    }
-
-                    $newData = [
-                        'farm_id'               => $farmId,
-                        'crop_id'               => $cropId,
-                        'planting_date'         => $plantingDate,
-                        'area_planted_hectares' => $areaPlanted,
-                        'seed_quantity_kg'      => $seedQty,
-                        'expected_harvest_date' => $expectedDate,
-                        'status_id'             => $statusId,
-                    ];
-
-                    logActivity($pdo, 'UPDATE', 'plantings', $plantingId, "Updated planting cycle #{$plantingId}", $oldRow, $newData);
-                    $pdo->commit();
-
-                    $_SESSION['flash_msg'] = "Planting cycle #{$plantingId} updated successfully.";
-                    $_SESSION['flash_type'] = 'success';
-                    header('Location: plantings.php?updated=1');
-                    exit;
-                }
+                $_SESSION['flash_msg'] = "Planting cycle #{$plantingId} updated successfully.";
+                $_SESSION['flash_type'] = 'success';
+                header('Location: plantings.php?updated=1');
+                exit;
             } catch (Throwable $e) {
-                if ($pdo->inTransaction()) $pdo->rollBack();
                 error_log('Planting update failed: ' . $e->getMessage());
-                if (strpos($e->getMessage(), '23502') !== false) {
+                if ($e->getMessage() === 'Planting record not found or already deleted.') {
+                    $msg = 'Planting record not found or already deleted.';
+                } elseif (strpos($e->getMessage(), '23502') !== false) {
                     $msg = 'Please fill out all mandatory planting fields.';
                 } else {
                     $msg = 'Failed to update planting: ' . $e->getMessage();
@@ -308,36 +202,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             $plantingId = (int)($_POST['planting_id'] ?? 0);
 
-            $guard = canSoftDelete($pdo, 'plantings', $plantingId);
-            if (!$guard['allowed']) {
-                $msg = $guard['message'];
-                $msgType = 'error';
-            } else {
-                try {
-                    $cur = $pdo->prepare("SELECT * FROM plantings WHERE planting_id = :id");
-                    $cur->execute([':id' => $plantingId]);
-                    $oldRow = $cur->fetch(PDO::FETCH_ASSOC);
+            try {
+                $plantingModel->softDelete($plantingId, $currentUserId);
 
-                    $pdo->beginTransaction();
-                    $stmt = $pdo->prepare("UPDATE plantings SET is_deleted = TRUE, updated_at = NOW(), updated_by = :updated_by WHERE planting_id = :id");
-                    $stmt->execute([
-                        ':updated_by' => $currentUserId,
-                        ':id'         => $plantingId,
-                    ]);
-
-                    logActivity($pdo, 'SOFT_DELETE', 'plantings', $plantingId, "Soft-deleted planting #{$plantingId}", $oldRow);
-                    $pdo->commit();
-
-                    $_SESSION['flash_msg'] = "Planting #{$plantingId} deactivated successfully.";
-                    $_SESSION['flash_type'] = 'success';
-                    header('Location: plantings.php?deleted=1');
-                    exit;
-                } catch (Throwable $e) {
-                    if ($pdo->inTransaction()) $pdo->rollBack();
-                    error_log('Planting delete failed: ' . $e->getMessage());
-                    $msg = 'Failed to delete planting: ' . $e->getMessage();
-                    $msgType = 'error';
+                $_SESSION['flash_msg'] = "Planting #{$plantingId} deactivated successfully.";
+                $_SESSION['flash_type'] = 'success';
+                header('Location: plantings.php?deleted=1');
+                exit;
+            } catch (Throwable $e) {
+                error_log('Planting delete failed: ' . $e->getMessage());
+                $msg = $e->getMessage();
+                if (strpos($msg, 'Cannot delete this') === false && strpos($msg, 'not found') === false && strpos($msg, 'already deleted') === false) {
+                    $msg = 'Failed to delete planting: ' . $msg;
                 }
+                $msgType = 'error';
             }
         }
     }
@@ -346,27 +224,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 require_once __DIR__ . '/includes/header.php';
 
 // Fetch active lookup options for dropdowns
-$activeFarms = $pdo->query("
-    SELECT fm.farm_id, fm.farm_name, f.last_name, f.first_name
-    FROM farms fm
-    JOIN farmers f ON f.farmer_id = fm.farmer_id
-    WHERE fm.is_deleted = FALSE AND f.is_deleted = FALSE
-    ORDER BY fm.farm_name ASC
-")->fetchAll(PDO::FETCH_ASSOC);
-
-$activeCrops = $pdo->query("
-    SELECT crop_id, crop_name, variety, growing_days
-    FROM crops
-    WHERE is_deleted = FALSE
-    ORDER BY crop_name ASC
-")->fetchAll(PDO::FETCH_ASSOC);
-
-$activeStatuses = $pdo->query("
-    SELECT status_id, description
-    FROM planting_status
-    WHERE is_deleted = FALSE
-    ORDER BY status_id ASC
-")->fetchAll(PDO::FETCH_ASSOC);
+$activeFarms    = $farmModel->getActiveFarmsForDropdown();
+$activeCrops    = $cropModel->getActiveCropsForDropdown();
+$activeStatuses = $plantingModel->getStatuses();
 
 // Search, Filters & Pagination
 $search       = trim((string)($_GET['search'] ?? ''));
@@ -376,65 +236,9 @@ $page         = max(1, (int)($_GET['page'] ?? 1));
 $perPage      = 15;
 $offset       = ($page - 1) * $perPage;
 
-$whereClauses = ["p.is_deleted = FALSE"];
-$params       = [];
-
-if ($search !== '') {
-    $whereClauses[] = "(fm.farm_name ILIKE :s OR c.crop_name ILIKE :s OR f.first_name ILIKE :s OR f.last_name ILIKE :s)";
-    $params[':s'] = "%{$search}%";
-}
-if ($filterStatus > 0) {
-    $whereClauses[] = "p.status_id = :status";
-    $params[':status'] = $filterStatus;
-}
-if ($filterCrop > 0) {
-    $whereClauses[] = "p.crop_id = :crop";
-    $params[':crop'] = $filterCrop;
-}
-$whereSql = 'WHERE ' . implode(' AND ', $whereClauses);
-
-// Count
-$countStmt = $pdo->prepare("
-    SELECT COUNT(*)
-    FROM plantings p
-    JOIN farms fm ON fm.farm_id = p.farm_id
-    JOIN farmers f ON f.farmer_id = fm.farmer_id
-    JOIN crops c ON c.crop_id = p.crop_id
-    {$whereSql}
-");
-$countStmt->execute($params);
-$totalRecords = (int)$countStmt->fetchColumn();
-$totalPages = max(1, (int)ceil($totalRecords / $perPage));
-
-// Fetch Records with multi-table JOIN
-$query = "
-    SELECT p.planting_id, p.farm_id, p.crop_id, p.planting_date,
-           p.area_planted_hectares, p.seed_quantity_kg, p.expected_harvest_date,
-           p.status_id, p.created_at,
-           fm.farm_name,
-           f.first_name AS farmer_first_name, f.last_name AS farmer_last_name,
-           c.crop_name, c.variety, c.growing_days,
-           ps.description AS status_name,
-           COALESCE(hv.harvest_count, 0) AS harvest_count,
-           COALESCE(hv.total_harvested_kg, 0) AS total_harvested_kg
-    FROM plantings p
-    JOIN farms fm ON fm.farm_id = p.farm_id
-    JOIN farmers f ON f.farmer_id = fm.farmer_id
-    JOIN crops c ON c.crop_id = p.crop_id
-    LEFT JOIN planting_status ps ON ps.status_id = p.status_id
-    LEFT JOIN (
-        SELECT planting_id, COUNT(*) AS harvest_count, SUM(quantity_kg) AS total_harvested_kg
-        FROM harvests
-        WHERE is_deleted = FALSE
-        GROUP BY planting_id
-    ) hv ON hv.planting_id = p.planting_id
-    {$whereSql}
-    ORDER BY p.planting_date DESC, p.planting_id DESC
-    LIMIT {$perPage} OFFSET {$offset}
-";
-$stmt = $pdo->prepare($query);
-$stmt->execute($params);
-$plantings = $stmt->fetchAll(PDO::FETCH_ASSOC);
+$totalRecords = $plantingModel->count($search, $filterStatus, $filterCrop);
+$totalPages   = max(1, (int)ceil($totalRecords / $perPage));
+$plantings    = $plantingModel->getAll($search, $filterStatus, $filterCrop, $perPage, $offset);
 ?>
 
 <div class="page-header">

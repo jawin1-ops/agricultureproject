@@ -13,6 +13,9 @@ require_once __DIR__ . '/includes/auth.php';
 requireLogin();
 
 require_once __DIR__ . '/includes/soft_delete_guard.php';
+require_once __DIR__ . '/classes/Crop.php';
+
+$cropModel = new Crop($pdo);
 
 $currentUserId = (int)currentUserId();
 $msg = '';
@@ -65,55 +68,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $msgType = 'error';
             $_SESSION['error'] = $msg;
         } else {
-            // Check for duplicate crop name before inserting
             try {
-                $dup = $pdo->prepare("SELECT crop_id FROM crops WHERE LOWER(crop_name) = LOWER(:name) AND is_deleted = FALSE LIMIT 1");
-                $dup->execute([':name' => $cropName]);
-                if ($dup->fetch()) {
-                    $msg = "A crop named '{$cropName}' already exists. Please choose a different name.";
-                    $msgType = 'error';
-                    $_SESSION['error'] = $msg;
-                } else {
-                    $pdo->beginTransaction();
-                    $stmt = $pdo->prepare("
-                        INSERT INTO crops
-                            (crop_name, variety, category_id, growing_days, season_id, is_deleted, created_at, updated_at, created_by, updated_by)
-                        VALUES
-                            (:crop_name, :variety, :cat, :days, :season, FALSE, NOW(), NOW(), :created_by, :updated_by)
-                        RETURNING crop_id
-                    ");
-                    $stmt->execute([
-                        ':crop_name'   => $cropName,
-                        ':variety'     => $variety ?: null,
-                        ':cat'         => $categoryId,
-                        ':days'        => $growingDays,
-                        ':season'      => $seasonId,
-                        ':created_by'  => $currentUserId,
-                        ':updated_by'  => $currentUserId,
-                    ]);
-                    $newCropId = (int)$stmt->fetchColumn();
+                $cropModel->create([
+                    'crop_name'    => $cropName,
+                    'variety'      => $variety,
+                    'category_id'  => $categoryId,
+                    'growing_days' => $growingDays,
+                    'season_id'    => $seasonId,
+                    'user_id'      => $currentUserId,
+                ]);
 
-                    $newData = [
-                        'crop_id'      => $newCropId,
-                        'crop_name'    => $cropName,
-                        'variety'      => $variety,
-                        'category_id'  => $categoryId,
-                        'growing_days' => $growingDays,
-                        'season_id'    => $seasonId,
-                    ];
-
-                    logActivity($pdo, 'CREATE', 'crops', $newCropId, "Added crop '{$cropName}'", null, $newData);
-                    $pdo->commit();
-
-                    $_SESSION['flash_msg'] = "Crop '{$cropName}' added successfully.";
-                    $_SESSION['flash_type'] = 'success';
-                    header('Location: crops.php?created=1');
-                    exit;
-                }
+                $_SESSION['flash_msg'] = "Crop '{$cropName}' added successfully.";
+                $_SESSION['flash_type'] = 'success';
+                header('Location: crops.php?created=1');
+                exit;
             } catch (Throwable $e) {
-                if ($pdo->inTransaction()) $pdo->rollBack();
                 error_log('Crop creation failed: ' . $e->getMessage());
-                if (strpos($e->getMessage(), '23505') !== false || strpos(strtolower($e->getMessage()), 'unique') !== false) {
+                if (strpos($e->getMessage(), '23505') !== false || strpos(strtolower($e->getMessage()), 'unique') !== false || strpos($e->getMessage(), 'already exists') !== false) {
                     $msg = "A crop named '{$cropName}' already exists. Please use a different name.";
                 } elseif (strpos($e->getMessage(), '23502') !== false) {
                     $msg = 'Please fill out all required crop fields.';
@@ -149,67 +120,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_SESSION['error'] = $msg;
         } else {
             try {
-                $cur = $pdo->prepare("SELECT * FROM crops WHERE crop_id = :id AND is_deleted = FALSE");
-                $cur->execute([':id' => $cropId]);
-                $oldRow = $cur->fetch(PDO::FETCH_ASSOC);
+                $cropModel->update($cropId, [
+                    'crop_name'    => $cropName,
+                    'variety'      => $variety,
+                    'category_id'  => $categoryId,
+                    'growing_days' => $growingDays,
+                    'season_id'    => $seasonId,
+                    'user_id'      => $currentUserId,
+                ]);
 
-                if (!$oldRow) {
-                    $msg = 'Crop not found or already deleted.';
-                    $msgType = 'error';
-                    $_SESSION['error'] = $msg;
-                } else {
-                    // Check duplicate crop name
-                    $dup = $pdo->prepare("SELECT crop_id FROM crops WHERE LOWER(crop_name) = LOWER(:name) AND crop_id <> :id AND is_deleted = FALSE LIMIT 1");
-                    $dup->execute([':name' => $cropName, ':id' => $cropId]);
-                    if ($dup->fetch()) {
-                        $msg = "A crop named '{$cropName}' already exists. Please choose a different name.";
-                        $msgType = 'error';
-                        $_SESSION['error'] = $msg;
-                    } else {
-                        $pdo->beginTransaction();
-                        $stmt = $pdo->prepare("
-                            UPDATE crops
-                            SET crop_name = :crop_name,
-                                variety = :variety,
-                                category_id = :cat,
-                                growing_days = :days,
-                                season_id = :season,
-                                updated_at = NOW(),
-                                updated_by = :updated_by
-                            WHERE crop_id = :id
-                        ");
-                        $stmt->execute([
-                            ':crop_name'   => $cropName,
-                            ':variety'     => $variety ?: null,
-                            ':cat'         => $categoryId,
-                            ':days'        => $growingDays,
-                            ':season'      => $seasonId,
-                            ':updated_by'  => $currentUserId,
-                            ':id'          => $cropId,
-                        ]);
-
-                        $newData = [
-                            'crop_name'    => $cropName,
-                            'variety'      => $variety,
-                            'category_id'  => $categoryId,
-                            'growing_days' => $growingDays,
-                            'season_id'    => $seasonId,
-                        ];
-
-                        logActivity($pdo, 'UPDATE', 'crops', $cropId, "Updated crop '{$cropName}'", $oldRow, $newData);
-                        $pdo->commit();
-
-                        $_SESSION['flash_msg'] = "Crop '{$cropName}' updated successfully.";
-                        $_SESSION['flash_type'] = 'success';
-                        header('Location: crops.php?updated=1');
-                        exit;
-                    }
-                }
+                $_SESSION['flash_msg'] = "Crop '{$cropName}' updated successfully.";
+                $_SESSION['flash_type'] = 'success';
+                header('Location: crops.php?updated=1');
+                exit;
             } catch (Throwable $e) {
-                if ($pdo->inTransaction()) $pdo->rollBack();
                 error_log('Crop update failed: ' . $e->getMessage());
-                if (strpos($e->getMessage(), '23505') !== false || strpos(strtolower($e->getMessage()), 'unique') !== false) {
-                    $msg = "A crop named '{$cropName}' already exists. Please use a different name.";
+                if ($e->getMessage() === 'Crop not found or already deleted.') {
+                    $msg = 'Crop not found or already deleted.';
+                } elseif (strpos($e->getMessage(), '23505') !== false || strpos(strtolower($e->getMessage()), 'unique') !== false || strpos($e->getMessage(), 'already exists') !== false) {
+                    $msg = "A crop named '{$cropName}' already exists. Please choose a different name.";
                 } elseif (strpos($e->getMessage(), '23502') !== false) {
                     $msg = 'Please fill out all required crop fields.';
                 } else {
@@ -229,36 +158,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             $cropId = (int)($_POST['crop_id'] ?? 0);
 
-            $guard = canSoftDelete($pdo, 'crops', $cropId);
-            if (!$guard['allowed']) {
-                $msg = $guard['message'];
-                $msgType = 'error';
-            } else {
-                try {
-                    $cur = $pdo->prepare("SELECT * FROM crops WHERE crop_id = :id");
-                    $cur->execute([':id' => $cropId]);
-                    $oldRow = $cur->fetch(PDO::FETCH_ASSOC);
+            try {
+                $oldRow = $cropModel->getById($cropId);
+                $cropName = $oldRow ? $oldRow['crop_name'] : 'record';
 
-                    $pdo->beginTransaction();
-                    $stmt = $pdo->prepare("UPDATE crops SET is_deleted = TRUE, updated_at = NOW(), updated_by = :updated_by WHERE crop_id = :id");
-                    $stmt->execute([
-                        ':updated_by' => $currentUserId,
-                        ':id'         => $cropId,
-                    ]);
+                $cropModel->softDelete($cropId, $currentUserId);
 
-                    logActivity($pdo, 'SOFT_DELETE', 'crops', $cropId, "Soft-deleted crop '{$oldRow['crop_name']}'", $oldRow);
-                    $pdo->commit();
-
-                    $_SESSION['flash_msg'] = "Crop '{$oldRow['crop_name']}' deactivated successfully.";
-                    $_SESSION['flash_type'] = 'success';
-                    header('Location: crops.php?deleted=1');
-                    exit;
-                } catch (Throwable $e) {
-                    if ($pdo->inTransaction()) $pdo->rollBack();
-                    error_log('Crop delete failed: ' . $e->getMessage());
-                    $msg = 'Failed to delete crop: ' . $e->getMessage();
-                    $msgType = 'error';
+                $_SESSION['flash_msg'] = "Crop '{$cropName}' deactivated successfully.";
+                $_SESSION['flash_type'] = 'success';
+                header('Location: crops.php?deleted=1');
+                exit;
+            } catch (Throwable $e) {
+                error_log('Crop delete failed: ' . $e->getMessage());
+                $msg = $e->getMessage();
+                if (strpos($msg, 'Cannot delete this') === false && strpos($msg, 'not found') === false && strpos($msg, 'already deleted') === false) {
+                    $msg = 'Failed to delete crop: ' . $msg;
                 }
+                $msgType = 'error';
             }
         }
     }
@@ -267,8 +183,8 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 require_once __DIR__ . '/includes/header.php';
 
 // Active lookup options for dropdowns
-$activeCategories = $pdo->query("SELECT category_id, description FROM crop_categories WHERE is_deleted = FALSE ORDER BY description ASC")->fetchAll(PDO::FETCH_ASSOC);
-$activeSeasons    = $pdo->query("SELECT season_id, description FROM seasons WHERE is_deleted = FALSE ORDER BY description ASC")->fetchAll(PDO::FETCH_ASSOC);
+$activeCategories = $cropModel->getCategories();
+$activeSeasons    = $cropModel->getSeasons();
 
 // Search, Filters & Pagination
 $search      = trim((string)($_GET['search'] ?? ''));
@@ -278,52 +194,9 @@ $page        = max(1, (int)($_GET['page'] ?? 1));
 $perPage     = 15;
 $offset      = ($page - 1) * $perPage;
 
-$whereClauses = ["c.is_deleted = FALSE"];
-$params       = [];
-
-if ($search !== '') {
-    $whereClauses[] = "(c.crop_name ILIKE :s OR c.variety ILIKE :s)";
-    $params[':s'] = "%{$search}%";
-}
-if ($filterCat > 0) {
-    $whereClauses[] = "c.category_id = :cat";
-    $params[':cat'] = $filterCat;
-}
-if ($filterSeas > 0) {
-    $whereClauses[] = "c.season_id = :season";
-    $params[':season'] = $filterSeas;
-}
-$whereSql = 'WHERE ' . implode(' AND ', $whereClauses);
-
-// Count
-$countStmt = $pdo->prepare("SELECT COUNT(*) FROM crops c {$whereSql}");
-$countStmt->execute($params);
-$totalRecords = (int)$countStmt->fetchColumn();
-$totalPages = max(1, (int)ceil($totalRecords / $perPage));
-
-// Fetch Records with JOINs
-$query = "
-    SELECT c.crop_id, c.crop_name, c.variety, c.category_id, c.growing_days,
-           c.season_id, c.created_at,
-           cc.description AS category_name,
-           s.description  AS season_name,
-           COALESCE(pl.planting_count, 0) AS active_plantings
-    FROM crops c
-    LEFT JOIN crop_categories cc ON cc.category_id = c.category_id
-    LEFT JOIN seasons s ON s.season_id = c.season_id
-    LEFT JOIN (
-        SELECT crop_id, COUNT(*) AS planting_count
-        FROM plantings
-        WHERE is_deleted = FALSE
-        GROUP BY crop_id
-    ) pl ON pl.crop_id = c.crop_id
-    {$whereSql}
-    ORDER BY c.crop_name ASC
-    LIMIT {$perPage} OFFSET {$offset}
-";
-$stmt = $pdo->prepare($query);
-$stmt->execute($params);
-$crops = $stmt->fetchAll(PDO::FETCH_ASSOC);
+$totalRecords = $cropModel->count($search, $filterCat, $filterSeas);
+$totalPages   = max(1, (int)ceil($totalRecords / $perPage));
+$crops        = $cropModel->getAll($search, $filterCat, $filterSeas, $perPage, $offset);
 ?>
 
 <div class="page-header">

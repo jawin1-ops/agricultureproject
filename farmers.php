@@ -13,6 +13,9 @@ require_once __DIR__ . '/includes/auth.php';
 requireLogin();
 
 require_once __DIR__ . '/includes/soft_delete_guard.php';
+require_once __DIR__ . '/classes/Farmer.php';
+
+$farmerModel = new Farmer($pdo);
 
 $currentUserId = (int)currentUserId();
 $msg = '';
@@ -40,30 +43,9 @@ if (isset($_SESSION['error'])) {
     unset($_SESSION['flash_msg'], $_SESSION['flash_type']);
 }
 
-// Check if barangay_id column exists on farmers table
-$hasBarangayCol = false;
-try {
-    $colChk = $pdo->query("SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'farmers' AND column_name = 'barangay_id'")->fetchColumn();
-    $hasBarangayCol = (bool)$colChk;
-} catch (Throwable $e) {}
-
-// Fetch active barangays lookup if table exists, otherwise fallback to defaults
-$activeBarangays = [];
-try {
-    $bStmt = $pdo->query("SELECT to_regclass('public.barangays')");
-    if ($bStmt && $bStmt->fetchColumn()) {
-        $activeBarangays = $pdo->query("SELECT barangay_id, barangay_name FROM barangays ORDER BY barangay_name ASC")->fetchAll(PDO::FETCH_ASSOC);
-    }
-} catch (Throwable $e) {}
-if (empty($activeBarangays)) {
-    $activeBarangays = [
-        ['barangay_id' => 1, 'barangay_name' => 'Barangay 1 (Poblacion)'],
-        ['barangay_id' => 2, 'barangay_name' => 'Barangay 2 (San Isidro)'],
-        ['barangay_id' => 3, 'barangay_name' => 'Barangay 3 (San Roque)'],
-        ['barangay_id' => 4, 'barangay_name' => 'Barangay 4 (Santa Maria)'],
-        ['barangay_id' => 5, 'barangay_name' => 'Barangay 5 (Santo Niño)']
-    ];
-}
+// Check if barangay_id column exists on farmers table & fetch active barangays lookup
+$hasBarangayCol = $farmerModel->hasBarangayColumn();
+$activeBarangays = $farmerModel->getActiveBarangays();
 
 // Handle POST actions (Create, Update, Soft Delete)
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
@@ -92,64 +74,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_SESSION['error'] = $msg;
         } else {
             try {
-                $pdo->beginTransaction();
-                if ($hasBarangayCol) {
-                    $stmt = $pdo->prepare("
-                        INSERT INTO farmers
-                            (first_name, last_name, contact_no, address, barangay_id, registration_date, is_deleted, created_at, updated_at, created_by, updated_by)
-                        VALUES
-                            (:first_name, :last_name, :contact_no, :address, :barangay_id, :reg_date, FALSE, NOW(), NOW(), :created_by, :updated_by)
-                        RETURNING farmer_id
-                    ");
-                    $stmt->execute([
-                        ':first_name'  => $firstName,
-                        ':last_name'   => $lastName,
-                        ':contact_no'  => $contactNo ?: null,
-                        ':address'     => $address ?: null,
-                        ':barangay_id' => $barangayId,
-                        ':reg_date'    => $regDate ?: date('Y-m-d'),
-                        ':created_by'  => $currentUserId,
-                        ':updated_by'  => $currentUserId,
-                    ]);
-                } else {
-                    $stmt = $pdo->prepare("
-                        INSERT INTO farmers
-                            (first_name, last_name, contact_no, address, registration_date, is_deleted, created_at, updated_at, created_by, updated_by)
-                        VALUES
-                            (:first_name, :last_name, :contact_no, :address, :reg_date, FALSE, NOW(), NOW(), :created_by, :updated_by)
-                        RETURNING farmer_id
-                    ");
-                    $stmt->execute([
-                        ':first_name' => $firstName,
-                        ':last_name'  => $lastName,
-                        ':contact_no' => $contactNo ?: null,
-                        ':address'    => $address ?: null,
-                        ':reg_date'   => $regDate ?: date('Y-m-d'),
-                        ':created_by' => $currentUserId,
-                        ':updated_by' => $currentUserId,
-                    ]);
-                }
-                $newFarmerId = (int)$stmt->fetchColumn();
-
-                $newData = [
-                    'farmer_id'         => $newFarmerId,
+                $farmerModel->create([
                     'first_name'        => $firstName,
                     'last_name'         => $lastName,
                     'contact_no'        => $contactNo,
                     'barangay_id'       => $barangayId,
                     'address'           => $address,
                     'registration_date' => $regDate,
-                ];
-
-                logActivity($pdo, 'CREATE', 'farmers', $newFarmerId, "Registered farmer '{$firstName} {$lastName}'", null, $newData);
-                $pdo->commit();
+                    'user_id'           => $currentUserId,
+                ]);
 
                 $_SESSION['flash_msg'] = "Farmer '{$firstName} {$lastName}' registered successfully.";
                 $_SESSION['flash_type'] = 'success';
                 header('Location: farmers.php?created=1');
                 exit;
             } catch (Throwable $e) {
-                if ($pdo->inTransaction()) $pdo->rollBack();
                 error_log('Farmer creation failed: ' . $e->getMessage());
                 if (strpos($e->getMessage(), '23502') !== false) {
                     $msg = 'Please fill out all mandatory fields before saving.';
@@ -192,83 +131,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_SESSION['error'] = $msg;
         } else {
             try {
-                $cur = $pdo->prepare("SELECT * FROM farmers WHERE farmer_id = :id AND is_deleted = FALSE");
-                $cur->execute([':id' => $farmerId]);
-                $oldRow = $cur->fetch(PDO::FETCH_ASSOC);
+                $farmerModel->update($farmerId, [
+                    'first_name'        => $firstName,
+                    'last_name'         => $lastName,
+                    'contact_no'        => $contactNo,
+                    'barangay_id'       => $barangayId,
+                    'address'           => $address,
+                    'registration_date' => $regDate,
+                    'user_id'           => $currentUserId,
+                ]);
 
-                if (!$oldRow) {
-                    $msg = 'Farmer record not found or already deleted.';
-                    $msgType = 'error';
-                    $_SESSION['error'] = $msg;
-                } else {
-                    $pdo->beginTransaction();
-                    if ($hasBarangayCol) {
-                        $stmt = $pdo->prepare("
-                            UPDATE farmers
-                            SET first_name = :first_name,
-                                last_name = :last_name,
-                                contact_no = :contact_no,
-                                address = :address,
-                                barangay_id = :barangay_id,
-                                registration_date = :reg_date,
-                                updated_at = NOW(),
-                                updated_by = :updated_by
-                            WHERE farmer_id = :id
-                        ");
-                        $stmt->execute([
-                            ':first_name'  => $firstName,
-                            ':last_name'   => $lastName,
-                            ':contact_no'  => $contactNo ?: null,
-                            ':address'     => $address ?: null,
-                            ':barangay_id' => $barangayId,
-                            ':reg_date'    => $regDate ?: date('Y-m-d'),
-                            ':updated_by'  => $currentUserId,
-                            ':id'          => $farmerId,
-                        ]);
-                    } else {
-                        $stmt = $pdo->prepare("
-                            UPDATE farmers
-                            SET first_name = :first_name,
-                                last_name = :last_name,
-                                contact_no = :contact_no,
-                                address = :address,
-                                registration_date = :reg_date,
-                                updated_at = NOW(),
-                                updated_by = :updated_by
-                            WHERE farmer_id = :id
-                        ");
-                        $stmt->execute([
-                            ':first_name' => $firstName,
-                            ':last_name'  => $lastName,
-                            ':contact_no' => $contactNo ?: null,
-                            ':address'    => $address ?: null,
-                            ':reg_date'   => $regDate ?: date('Y-m-d'),
-                            ':updated_by' => $currentUserId,
-                            ':id'         => $farmerId,
-                        ]);
-                    }
-
-                    $newData = [
-                        'first_name'        => $firstName,
-                        'last_name'         => $lastName,
-                        'contact_no'        => $contactNo,
-                        'barangay_id'       => $barangayId,
-                        'address'           => $address,
-                        'registration_date' => $regDate,
-                    ];
-
-                    logActivity($pdo, 'UPDATE', 'farmers', $farmerId, "Updated farmer record '{$firstName} {$lastName}'", $oldRow, $newData);
-                    $pdo->commit();
-
-                    $_SESSION['flash_msg'] = "Farmer '{$firstName} {$lastName}' updated successfully.";
-                    $_SESSION['flash_type'] = 'success';
-                    header('Location: farmers.php?updated=1');
-                    exit;
-                }
+                $_SESSION['flash_msg'] = "Farmer '{$firstName} {$lastName}' updated successfully.";
+                $_SESSION['flash_type'] = 'success';
+                header('Location: farmers.php?updated=1');
+                exit;
             } catch (Throwable $e) {
-                if ($pdo->inTransaction()) $pdo->rollBack();
                 error_log('Farmer update failed: ' . $e->getMessage());
-                if (strpos($e->getMessage(), '23502') !== false) {
+                if ($e->getMessage() === 'Farmer record not found or already deleted.') {
+                    $msg = 'Farmer record not found or already deleted.';
+                } elseif (strpos($e->getMessage(), '23502') !== false) {
                     $msg = 'Please fill out all mandatory fields before saving.';
                 } elseif (strpos($e->getMessage(), '23505') !== false) {
                     $msg = 'A farmer with these unique details already exists.';
@@ -289,41 +170,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             $farmerId = (int)($_POST['farmer_id'] ?? 0);
 
-            // Referential integrity check via soft_delete_guard
-            $guard = canSoftDelete($pdo, 'farmers', $farmerId);
-            if (!$guard['allowed']) {
-                $msg = $guard['message'];
-                $msgType = 'error';
-            } else {
-                try {
-                    $cur = $pdo->prepare("SELECT * FROM farmers WHERE farmer_id = :id");
-                    $cur->execute([':id' => $farmerId]);
-                    $oldRow = $cur->fetch(PDO::FETCH_ASSOC);
+            try {
+                $oldRow = $farmerModel->getById($farmerId);
+                $farmerName = $oldRow ? "{$oldRow['first_name']} {$oldRow['last_name']}" : "record";
 
-                    $pdo->beginTransaction();
-                    $stmt = $pdo->prepare("
-                        UPDATE farmers
-                        SET is_deleted = TRUE, updated_at = NOW(), updated_by = :updated_by
-                        WHERE farmer_id = :id
-                    ");
-                    $stmt->execute([
-                        ':updated_by' => $currentUserId,
-                        ':id'         => $farmerId,
-                    ]);
+                $farmerModel->softDelete($farmerId, $currentUserId);
 
-                    logActivity($pdo, 'SOFT_DELETE', 'farmers', $farmerId, "Soft-deleted farmer '{$oldRow['first_name']} {$oldRow['last_name']}'", $oldRow);
-                    $pdo->commit();
-
-                    $_SESSION['flash_msg'] = "Farmer '{$oldRow['first_name']} {$oldRow['last_name']}' deactivated successfully.";
-                    $_SESSION['flash_type'] = 'success';
-                    header('Location: farmers.php?deleted=1');
-                    exit;
-                } catch (Throwable $e) {
-                    if ($pdo->inTransaction()) $pdo->rollBack();
-                    error_log('Farmer soft delete failed: ' . $e->getMessage());
-                    $msg = 'Failed to delete farmer: ' . $e->getMessage();
-                    $msgType = 'error';
+                $_SESSION['flash_msg'] = "Farmer '{$farmerName}' deactivated successfully.";
+                $_SESSION['flash_type'] = 'success';
+                header('Location: farmers.php?deleted=1');
+                exit;
+            } catch (Throwable $e) {
+                error_log('Farmer soft delete failed: ' . $e->getMessage());
+                $msg = $e->getMessage();
+                if (strpos($msg, 'Cannot delete this') === false && strpos($msg, 'not found') === false && strpos($msg, 'already deleted') === false) {
+                    $msg = 'Failed to delete farmer: ' . $msg;
                 }
+                $msgType = 'error';
             }
         }
     }
@@ -339,49 +202,9 @@ $page    = max(1, (int)($_GET['page'] ?? 1));
 $perPage = 15;
 $offset  = ($page - 1) * $perPage;
 
-$sortColumns = [
-    'id'   => 'f.farmer_id',
-    'name' => 'f.last_name',
-    'date' => 'f.registration_date',
-];
-$sortSql = $sortColumns[$sort] ?? 'f.last_name';
-
-// Base Query (Active records only: is_deleted = FALSE)
-$whereClauses = ["f.is_deleted = FALSE"];
-$params = [];
-
-if ($search !== '') {
-    $whereClauses[] = "(f.first_name ILIKE :s OR f.last_name ILIKE :s OR f.address ILIKE :s OR f.contact_no ILIKE :s)";
-    $params[':s'] = "%{$search}%";
-}
-$whereSql = 'WHERE ' . implode(' AND ', $whereClauses);
-
-// Count matching records
-$countStmt = $pdo->prepare("SELECT COUNT(*) FROM farmers f {$whereSql}");
-$countStmt->execute($params);
-$totalRecords = (int)$countStmt->fetchColumn();
-$totalPages = max(1, (int)ceil($totalRecords / $perPage));
-
-// Fetch records with farm counts
-$query = "
-    SELECT f.farmer_id, f.first_name, f.last_name, f.contact_no, f.address,
-           f.registration_date, f.created_at,
-           COALESCE(fm.farm_count, 0) AS active_farms,
-           COALESCE(fm.total_hectares, 0) AS total_hectares
-    FROM farmers f
-    LEFT JOIN (
-        SELECT farmer_id, COUNT(*) AS farm_count, SUM(area_hectares) AS total_hectares
-        FROM farms
-        WHERE is_deleted = FALSE
-        GROUP BY farmer_id
-    ) fm ON fm.farmer_id = f.farmer_id
-    {$whereSql}
-    ORDER BY {$sortSql} {$order}, f.farmer_id DESC
-    LIMIT {$perPage} OFFSET {$offset}
-";
-$stmt = $pdo->prepare($query);
-$stmt->execute($params);
-$farmers = $stmt->fetchAll(PDO::FETCH_ASSOC);
+$totalRecords = $farmerModel->count($search);
+$totalPages   = max(1, (int)ceil($totalRecords / $perPage));
+$farmers      = $farmerModel->getAll($search, $sort, $order, $perPage, $offset);
 ?>
 
 <div class="page-header">

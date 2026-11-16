@@ -14,6 +14,11 @@ require_once __DIR__ . '/includes/auth.php';
 requireLogin();
 
 require_once __DIR__ . '/includes/soft_delete_guard.php';
+require_once __DIR__ . '/classes/Harvest.php';
+require_once __DIR__ . '/classes/Planting.php';
+
+$harvestModel  = new Harvest($pdo);
+$plantingModel = new Planting($pdo);
 
 $currentUserId = (int)currentUserId();
 $msg = '';
@@ -76,63 +81,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_SESSION['error'] = $msg;
         } else {
             try {
-                $pdo->beginTransaction();
-
-                // Insert harvest
-                $stmt = $pdo->prepare("
-                    INSERT INTO harvests
-                        (planting_id, harvest_date, quantity_kg, selling_price_per_kg, grade_id, remark_id,
-                         is_deleted, created_at, updated_at, created_by, updated_by)
-                    VALUES
-                        (:planting_id, :h_date, :qty, :price, :grade, :remark,
-                         FALSE, NOW(), NOW(), :created_by, :updated_by)
-                    RETURNING harvest_id
-                ");
-                $stmt->execute([
-                    ':planting_id' => $plantingId,
-                    ':h_date'      => $harvestDate,
-                    ':qty'         => $quantityKg,
-                    ':price'       => $sellingPrice > 0 ? $sellingPrice : null,
-                    ':grade'       => $gradeId,
-                    ':remark'      => $remarkId,
-                    ':created_by'  => $currentUserId,
-                    ':updated_by'  => $currentUserId,
-                ]);
-                $newHarvestId = (int)$stmt->fetchColumn();
-
-                // Spec Requirement: Automatically update related planting's status to Harvested (3)
-                $updPlanting = $pdo->prepare("
-                    UPDATE plantings
-                    SET status_id = 3, updated_at = NOW(), updated_by = :user_id
-                    WHERE planting_id = :planting_id AND status_id <> 3
-                ");
-                $updPlanting->execute([
-                    ':user_id'     => $currentUserId,
-                    ':planting_id' => $plantingId
-                ]);
-
-                $totalValue = $quantityKg * $sellingPrice;
-                $newData = [
-                    'harvest_id'           => $newHarvestId,
+                $newHarvestId = $harvestModel->create([
                     'planting_id'          => $plantingId,
                     'harvest_date'         => $harvestDate,
                     'quantity_kg'          => $quantityKg,
                     'selling_price_per_kg' => $sellingPrice,
-                    'total_value'          => $totalValue,
                     'grade_id'             => $gradeId,
                     'remark_id'            => $remarkId,
-                    'planting_auto_status' => 'Harvested (3)',
-                ];
-
-                logActivity($pdo, 'CREATE', 'harvests', $newHarvestId, "Recorded harvest #{$newHarvestId} ({$quantityKg} kg)", null, $newData);
-                $pdo->commit();
+                    'user_id'              => $currentUserId,
+                ]);
 
                 $_SESSION['flash_msg'] = "Harvest #{$newHarvestId} recorded successfully. Related planting status set to 'Harvested'.";
                 $_SESSION['flash_type'] = 'success';
                 header('Location: harvests.php?created=1');
                 exit;
             } catch (Throwable $e) {
-                if ($pdo->inTransaction()) $pdo->rollBack();
                 error_log('Harvest creation failed: ' . $e->getMessage());
                 if (strpos($e->getMessage(), '23502') !== false) {
                     $msg = 'Please fill out all mandatory harvest fields.';
@@ -177,73 +140,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_SESSION['error'] = $msg;
         } else {
             try {
-                $cur = $pdo->prepare("SELECT * FROM harvests WHERE harvest_id = :id AND is_deleted = FALSE");
-                $cur->execute([':id' => $harvestId]);
-                $oldRow = $cur->fetch(PDO::FETCH_ASSOC);
+                $harvestModel->update($harvestId, [
+                    'planting_id'          => $plantingId,
+                    'harvest_date'         => $harvestDate,
+                    'quantity_kg'          => $quantityKg,
+                    'selling_price_per_kg' => $sellingPrice,
+                    'grade_id'             => $gradeId,
+                    'remark_id'            => $remarkId,
+                    'user_id'              => $currentUserId,
+                ]);
 
-                if (!$oldRow) {
-                    $msg = 'Harvest not found or already deleted.';
-                    $msgType = 'error';
-                    $_SESSION['error'] = $msg;
-                } else {
-                    $pdo->beginTransaction();
-                    $stmt = $pdo->prepare("
-                        UPDATE harvests
-                        SET planting_id = :planting_id,
-                            harvest_date = :h_date,
-                            quantity_kg = :qty,
-                            selling_price_per_kg = :price,
-                            grade_id = :grade,
-                            remark_id = :remark,
-                            updated_at = NOW(),
-                            updated_by = :updated_by
-                        WHERE harvest_id = :id
-                    ");
-                    $stmt->execute([
-                        ':planting_id' => $plantingId,
-                        ':h_date'      => $harvestDate,
-                        ':qty'         => $quantityKg,
-                        ':price'       => $sellingPrice > 0 ? $sellingPrice : null,
-                        ':grade'       => $gradeId,
-                        ':remark'      => $remarkId,
-                        ':updated_by'  => $currentUserId,
-                        ':id'          => $harvestId,
-                    ]);
-
-                    // Bug Fix #1 (harvests side): Ensure the linked planting status is synced
-                    // to Harvested (3) whenever a harvest record is updated — mirrors create behaviour.
-                    $updPlanting = $pdo->prepare("
-                        UPDATE plantings
-                        SET status_id = 3, updated_at = NOW(), updated_by = :user_id
-                        WHERE planting_id = :planting_id AND status_id <> 3
-                    ");
-                    $updPlanting->execute([
-                        ':user_id'     => $currentUserId,
-                        ':planting_id' => $plantingId,
-                    ]);
-
-                    $newData = [
-                        'planting_id'          => $plantingId,
-                        'harvest_date'         => $harvestDate,
-                        'quantity_kg'          => $quantityKg,
-                        'selling_price_per_kg' => $sellingPrice,
-                        'grade_id'             => $gradeId,
-                        'remark_id'            => $remarkId,
-                        'planting_auto_status' => 'Harvested (3)',
-                    ];
-
-                    logActivity($pdo, 'UPDATE', 'harvests', $harvestId, "Updated harvest #{$harvestId}", $oldRow, $newData);
-                    $pdo->commit();
-
-                    $_SESSION['flash_msg'] = "Harvest #{$harvestId} updated successfully.";
-                    $_SESSION['flash_type'] = 'success';
-                    header('Location: harvests.php?updated=1');
-                    exit;
-                }
+                $_SESSION['flash_msg'] = "Harvest #{$harvestId} updated successfully.";
+                $_SESSION['flash_type'] = 'success';
+                header('Location: harvests.php?updated=1');
+                exit;
             } catch (Throwable $e) {
-                if ($pdo->inTransaction()) $pdo->rollBack();
                 error_log('Harvest update failed: ' . $e->getMessage());
-                if (strpos($e->getMessage(), '23502') !== false) {
+                if ($e->getMessage() === 'Harvest not found or already deleted.') {
+                    $msg = 'Harvest not found or already deleted.';
+                } elseif (strpos($e->getMessage(), '23502') !== false) {
                     $msg = 'Please fill out all mandatory harvest fields.';
                 } else {
                     $msg = 'Failed to update harvest: ' . $e->getMessage();
@@ -262,36 +177,20 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             $harvestId = (int)($_POST['harvest_id'] ?? 0);
 
-            $guard = canSoftDelete($pdo, 'harvests', $harvestId);
-            if (!$guard['allowed']) {
-                $msg = $guard['message'];
-                $msgType = 'error';
-            } else {
-                try {
-                    $cur = $pdo->prepare("SELECT * FROM harvests WHERE harvest_id = :id");
-                    $cur->execute([':id' => $harvestId]);
-                    $oldRow = $cur->fetch(PDO::FETCH_ASSOC);
+            try {
+                $harvestModel->softDelete($harvestId, $currentUserId);
 
-                    $pdo->beginTransaction();
-                    $stmt = $pdo->prepare("UPDATE harvests SET is_deleted = TRUE, updated_at = NOW(), updated_by = :updated_by WHERE harvest_id = :id");
-                    $stmt->execute([
-                        ':updated_by' => $currentUserId,
-                        ':id'         => $harvestId,
-                    ]);
-
-                    logActivity($pdo, 'SOFT_DELETE', 'harvests', $harvestId, "Soft-deleted harvest #{$harvestId}", $oldRow);
-                    $pdo->commit();
-
-                    $_SESSION['flash_msg'] = "Harvest #{$harvestId} deactivated successfully.";
-                    $_SESSION['flash_type'] = 'success';
-                    header('Location: harvests.php?deleted=1');
-                    exit;
-                } catch (Throwable $e) {
-                    if ($pdo->inTransaction()) $pdo->rollBack();
-                    error_log('Harvest delete failed: ' . $e->getMessage());
-                    $msg = 'Failed to delete harvest: ' . $e->getMessage();
-                    $msgType = 'error';
+                $_SESSION['flash_msg'] = "Harvest #{$harvestId} deactivated successfully.";
+                $_SESSION['flash_type'] = 'success';
+                header('Location: harvests.php?deleted=1');
+                exit;
+            } catch (Throwable $e) {
+                error_log('Harvest delete failed: ' . $e->getMessage());
+                $msg = $e->getMessage();
+                if (strpos($msg, 'Cannot delete this') === false && strpos($msg, 'not found') === false && strpos($msg, 'already deleted') === false) {
+                    $msg = 'Failed to delete harvest: ' . $msg;
                 }
+                $msgType = 'error';
             }
         }
     }
@@ -300,19 +199,11 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 require_once __DIR__ . '/includes/header.php';
 
 // Active Lookups
-$activeGrades  = $pdo->query("SELECT grade_id, description FROM quality_grades WHERE is_deleted = FALSE ORDER BY grade_id ASC")->fetchAll(PDO::FETCH_ASSOC);
-$activeRemarks = $pdo->query("SELECT remark_id, description FROM harvest_remarks WHERE is_deleted = FALSE ORDER BY remark_id ASC")->fetchAll(PDO::FETCH_ASSOC);
+$activeGrades  = $harvestModel->getQualityGrades();
+$activeRemarks = $harvestModel->getHarvestRemarks();
 
 // Plantings available for harvest selection
-$plantingsList = $pdo->query("
-    SELECT p.planting_id, p.planting_date, c.crop_name, c.variety, fm.farm_name, f.last_name
-    FROM plantings p
-    JOIN farms fm ON fm.farm_id = p.farm_id
-    JOIN farmers f ON f.farmer_id = fm.farmer_id
-    JOIN crops c ON c.crop_id = p.crop_id
-    WHERE p.is_deleted = FALSE
-    ORDER BY p.planting_date DESC
-")->fetchAll(PDO::FETCH_ASSOC);
+$plantingsList = $plantingModel->getActivePlantingsForHarvest();
 
 // Search, Filters & Pagination
 $search      = trim((string)($_GET['search'] ?? ''));
@@ -322,65 +213,12 @@ $page        = max(1, (int)($_GET['page'] ?? 1));
 $perPage     = 15;
 $offset      = ($page - 1) * $perPage;
 
-$whereClauses = ["h.is_deleted = FALSE"];
-$params       = [];
-
-if ($search !== '') {
-    $whereClauses[] = "(c.crop_name ILIKE :s OR fm.farm_name ILIKE :s OR f.last_name ILIKE :s OR f.first_name ILIKE :s)";
-    $params[':s'] = "%{$search}%";
-}
-if ($filterGrade > 0) {
-    $whereClauses[] = "h.grade_id = :grade";
-    $params[':grade'] = $filterGrade;
-}
-if ($filterRem > 0) {
-    $whereClauses[] = "h.remark_id = :remark";
-    $params[':remark'] = $filterRem;
-}
-$whereSql = 'WHERE ' . implode(' AND ', $whereClauses);
-
 // Summary KPI aggregates
-$aggStmt = $pdo->prepare("
-    SELECT COUNT(*) AS total_count,
-           COALESCE(SUM(h.quantity_kg), 0) AS total_kg,
-           COALESCE(SUM(h.quantity_kg * COALESCE(h.selling_price_per_kg, 0)), 0) AS total_revenue
-    FROM harvests h
-    JOIN plantings p ON p.planting_id = h.planting_id
-    JOIN farms fm ON fm.farm_id = p.farm_id
-    JOIN farmers f ON f.farmer_id = fm.farmer_id
-    JOIN crops c ON c.crop_id = p.crop_id
-    {$whereSql}
-");
-$aggStmt->execute($params);
-$summary = $aggStmt->fetch(PDO::FETCH_ASSOC);
-
+$summary      = $harvestModel->getSummary($search, $filterGrade, $filterRem);
 $totalRecords = (int)($summary['total_count'] ?? 0);
 $totalPages   = max(1, (int)ceil($totalRecords / $perPage));
 
-// Fetch Records with multi-table JOIN
-$query = "
-    SELECT h.harvest_id, h.planting_id, h.harvest_date, h.quantity_kg,
-           h.selling_price_per_kg, h.grade_id, h.remark_id, h.created_at,
-           (h.quantity_kg * COALESCE(h.selling_price_per_kg, 0)) AS total_value,
-           c.crop_name, c.variety,
-           fm.farm_name,
-           f.first_name AS farmer_first_name, f.last_name AS farmer_last_name,
-           qg.description AS grade_name,
-           hr.description AS remark_name
-    FROM harvests h
-    JOIN plantings p ON p.planting_id = h.planting_id
-    JOIN farms fm ON fm.farm_id = p.farm_id
-    JOIN farmers f ON f.farmer_id = fm.farmer_id
-    JOIN crops c ON c.crop_id = p.crop_id
-    LEFT JOIN quality_grades qg ON qg.grade_id = h.grade_id
-    LEFT JOIN harvest_remarks hr ON hr.remark_id = h.remark_id
-    {$whereSql}
-    ORDER BY h.harvest_date DESC, h.harvest_id DESC
-    LIMIT {$perPage} OFFSET {$offset}
-";
-$stmt = $pdo->prepare($query);
-$stmt->execute($params);
-$harvests = $stmt->fetchAll(PDO::FETCH_ASSOC);
+$harvests     = $harvestModel->getAll($search, $filterGrade, $filterRem, $perPage, $offset);
 ?>
 
 <div class="page-header">

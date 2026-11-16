@@ -13,6 +13,11 @@ require_once __DIR__ . '/includes/auth.php';
 requireLogin();
 
 require_once __DIR__ . '/includes/soft_delete_guard.php';
+require_once __DIR__ . '/classes/Farm.php';
+require_once __DIR__ . '/classes/Farmer.php';
+
+$farmModel = new Farm($pdo);
+$farmerModel = new Farmer($pdo);
 
 $currentUserId = (int)currentUserId();
 $msg = '';
@@ -71,45 +76,21 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_SESSION['error'] = $msg;
         } else {
             try {
-                $pdo->beginTransaction();
-                $stmt = $pdo->prepare("
-                    INSERT INTO farms
-                        (farmer_id, farm_name, location, area_hectares, soil_type_id, irrigation_type_id, is_deleted, created_at, updated_at, created_by, updated_by)
-                    VALUES
-                        (:farmer_id, :farm_name, :location, :area, :soil, :irrig, FALSE, NOW(), NOW(), :created_by, :updated_by)
-                    RETURNING farm_id
-                ");
-                $stmt->execute([
-                    ':farmer_id'  => $farmerId,
-                    ':farm_name'  => $farmName,
-                    ':location'   => $location ?: null,
-                    ':area'       => $areaHectares > 0 ? $areaHectares : null,
-                    ':soil'       => $soilTypeId,
-                    ':irrig'      => $irrigTypeId,
-                    ':created_by' => $currentUserId,
-                    ':updated_by' => $currentUserId,
-                ]);
-                $newFarmId = (int)$stmt->fetchColumn();
-
-                $newData = [
-                    'farm_id'            => $newFarmId,
+                $farmModel->create([
                     'farmer_id'          => $farmerId,
                     'farm_name'          => $farmName,
                     'location'           => $location,
                     'area_hectares'      => $areaHectares,
                     'soil_type_id'       => $soilTypeId,
                     'irrigation_type_id' => $irrigTypeId,
-                ];
-
-                logActivity($pdo, 'CREATE', 'farms', $newFarmId, "Created farm '{$farmName}'", null, $newData);
-                $pdo->commit();
+                    'user_id'            => $currentUserId,
+                ]);
 
                 $_SESSION['flash_msg'] = "Farm '{$farmName}' created successfully.";
                 $_SESSION['flash_type'] = 'success';
                 header('Location: farms.php?created=1');
                 exit;
             } catch (Throwable $e) {
-                if ($pdo->inTransaction()) $pdo->rollBack();
                 error_log('Farm creation failed: ' . $e->getMessage());
                 if (strpos($e->getMessage(), '23502') !== false) {
                     $msg = 'Please fill out all mandatory farm fields before saving.';
@@ -152,60 +133,25 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             $_SESSION['error'] = $msg;
         } else {
             try {
-                $cur = $pdo->prepare("SELECT * FROM farms WHERE farm_id = :id AND is_deleted = FALSE");
-                $cur->execute([':id' => $farmId]);
-                $oldRow = $cur->fetch(PDO::FETCH_ASSOC);
+                $farmModel->update($farmId, [
+                    'farmer_id'          => $farmerId,
+                    'farm_name'          => $farmName,
+                    'location'           => $location,
+                    'area_hectares'      => $areaHectares,
+                    'soil_type_id'       => $soilTypeId,
+                    'irrigation_type_id' => $irrigTypeId,
+                    'user_id'            => $currentUserId,
+                ]);
 
-                if (!$oldRow) {
-                    $msg = 'Farm not found or already deleted.';
-                    $msgType = 'error';
-                    $_SESSION['error'] = $msg;
-                } else {
-                    $pdo->beginTransaction();
-                    $stmt = $pdo->prepare("
-                        UPDATE farms
-                        SET farmer_id = :farmer_id,
-                            farm_name = :farm_name,
-                            location = :location,
-                            area_hectares = :area,
-                            soil_type_id = :soil,
-                            irrigation_type_id = :irrig,
-                            updated_at = NOW(),
-                            updated_by = :updated_by
-                        WHERE farm_id = :id
-                    ");
-                    $stmt->execute([
-                        ':farmer_id'  => $farmerId,
-                        ':farm_name'  => $farmName,
-                        ':location'   => $location ?: null,
-                        ':area'       => $areaHectares > 0 ? $areaHectares : null,
-                        ':soil'       => $soilTypeId,
-                        ':irrig'      => $irrigTypeId,
-                        ':updated_by' => $currentUserId,
-                        ':id'         => $farmId,
-                    ]);
-
-                    $newData = [
-                        'farmer_id'          => $farmerId,
-                        'farm_name'          => $farmName,
-                        'location'           => $location,
-                        'area_hectares'      => $areaHectares,
-                        'soil_type_id'       => $soilTypeId,
-                        'irrigation_type_id' => $irrigTypeId,
-                    ];
-
-                    logActivity($pdo, 'UPDATE', 'farms', $farmId, "Updated farm '{$farmName}'", $oldRow, $newData);
-                    $pdo->commit();
-
-                    $_SESSION['flash_msg'] = "Farm '{$farmName}' updated successfully.";
-                    $_SESSION['flash_type'] = 'success';
-                    header('Location: farms.php?updated=1');
-                    exit;
-                }
+                $_SESSION['flash_msg'] = "Farm '{$farmName}' updated successfully.";
+                $_SESSION['flash_type'] = 'success';
+                header('Location: farms.php?updated=1');
+                exit;
             } catch (Throwable $e) {
-                if ($pdo->inTransaction()) $pdo->rollBack();
                 error_log('Farm update failed: ' . $e->getMessage());
-                if (strpos($e->getMessage(), '23502') !== false) {
+                if ($e->getMessage() === 'Farm not found or already deleted.') {
+                    $msg = 'Farm not found or already deleted.';
+                } elseif (strpos($e->getMessage(), '23502') !== false) {
                     $msg = 'Please fill out all mandatory farm fields before saving.';
                 } elseif (strpos($e->getMessage(), '23505') !== false) {
                     $msg = 'A farm with this name already exists.';
@@ -226,36 +172,23 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         } else {
             $farmId = (int)($_POST['farm_id'] ?? 0);
 
-            $guard = canSoftDelete($pdo, 'farms', $farmId);
-            if (!$guard['allowed']) {
-                $msg = $guard['message'];
-                $msgType = 'error';
-            } else {
-                try {
-                    $cur = $pdo->prepare("SELECT * FROM farms WHERE farm_id = :id");
-                    $cur->execute([':id' => $farmId]);
-                    $oldRow = $cur->fetch(PDO::FETCH_ASSOC);
+            try {
+                $oldRow = $farmModel->getById($farmId);
+                $farmName = $oldRow ? $oldRow['farm_name'] : 'record';
 
-                    $pdo->beginTransaction();
-                    $stmt = $pdo->prepare("UPDATE farms SET is_deleted = TRUE, updated_at = NOW(), updated_by = :updated_by WHERE farm_id = :id");
-                    $stmt->execute([
-                        ':updated_by' => $currentUserId,
-                        ':id'         => $farmId,
-                    ]);
+                $farmModel->softDelete($farmId, $currentUserId);
 
-                    logActivity($pdo, 'SOFT_DELETE', 'farms', $farmId, "Soft-deleted farm '{$oldRow['farm_name']}'", $oldRow);
-                    $pdo->commit();
-
-                    $_SESSION['flash_msg'] = "Farm '{$oldRow['farm_name']}' deactivated successfully.";
-                    $_SESSION['flash_type'] = 'success';
-                    header('Location: farms.php?deleted=1');
-                    exit;
-                } catch (Throwable $e) {
-                    if ($pdo->inTransaction()) $pdo->rollBack();
-                    error_log('Farm delete failed: ' . $e->getMessage());
-                    $msg = 'Failed to delete farm: ' . $e->getMessage();
-                    $msgType = 'error';
+                $_SESSION['flash_msg'] = "Farm '{$farmName}' deactivated successfully.";
+                $_SESSION['flash_type'] = 'success';
+                header('Location: farms.php?deleted=1');
+                exit;
+            } catch (Throwable $e) {
+                error_log('Farm delete failed: ' . $e->getMessage());
+                $msg = $e->getMessage();
+                if (strpos($msg, 'Cannot delete this') === false && strpos($msg, 'not found') === false && strpos($msg, 'already deleted') === false) {
+                    $msg = 'Failed to delete farm: ' . $msg;
                 }
+                $msgType = 'error';
             }
         }
     }
@@ -264,9 +197,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 require_once __DIR__ . '/includes/header.php';
 
 // Fetch active lookup options for dropdowns
-$activeFarmers = $pdo->query("SELECT farmer_id, first_name, last_name FROM farmers WHERE is_deleted = FALSE ORDER BY last_name ASC, first_name ASC")->fetchAll(PDO::FETCH_ASSOC);
-$activeSoils   = $pdo->query("SELECT soil_type_id, description FROM soil_types WHERE is_deleted = FALSE ORDER BY description ASC")->fetchAll(PDO::FETCH_ASSOC);
-$activeIrrigs  = $pdo->query("SELECT irrigation_type_id, description FROM irrigation_types WHERE is_deleted = FALSE ORDER BY description ASC")->fetchAll(PDO::FETCH_ASSOC);
+$activeFarmers = $farmerModel->getActiveFarmers();
+$activeSoils   = $farmModel->getSoilTypes();
+$activeIrrigs  = $farmModel->getIrrigationTypes();
 
 // Search, Filters & Pagination
 $search      = trim((string)($_GET['search'] ?? ''));
@@ -276,59 +209,9 @@ $page        = max(1, (int)($_GET['page'] ?? 1));
 $perPage     = 15;
 $offset      = ($page - 1) * $perPage;
 
-$whereClauses = ["fm.is_deleted = FALSE"];
-$params       = [];
-
-if ($search !== '') {
-    $whereClauses[] = "(fm.farm_name ILIKE :s OR fm.location ILIKE :s OR f.first_name ILIKE :s OR f.last_name ILIKE :s)";
-    $params[':s'] = "%{$search}%";
-}
-if ($filterSoil > 0) {
-    $whereClauses[] = "fm.soil_type_id = :soil";
-    $params[':soil'] = $filterSoil;
-}
-if ($filterIrrig > 0) {
-    $whereClauses[] = "fm.irrigation_type_id = :irrig";
-    $params[':irrig'] = $filterIrrig;
-}
-$whereSql = 'WHERE ' . implode(' AND ', $whereClauses);
-
-// Count
-$countStmt = $pdo->prepare("
-    SELECT COUNT(*)
-    FROM farms fm
-    JOIN farmers f ON f.farmer_id = fm.farmer_id
-    {$whereSql}
-");
-$countStmt->execute($params);
-$totalRecords = (int)$countStmt->fetchColumn();
-$totalPages = max(1, (int)ceil($totalRecords / $perPage));
-
-// Fetch Records with JOINs
-$query = "
-    SELECT fm.farm_id, fm.farmer_id, fm.farm_name, fm.location, fm.area_hectares,
-           fm.soil_type_id, fm.irrigation_type_id, fm.created_at,
-           f.first_name, f.last_name,
-           st.description AS soil_name,
-           it.description AS irrigation_name,
-           COALESCE(pl.planting_count, 0) AS active_plantings
-    FROM farms fm
-    JOIN farmers f ON f.farmer_id = fm.farmer_id
-    LEFT JOIN soil_types st ON st.soil_type_id = fm.soil_type_id
-    LEFT JOIN irrigation_types it ON it.irrigation_type_id = fm.irrigation_type_id
-    LEFT JOIN (
-        SELECT farm_id, COUNT(*) AS planting_count
-        FROM plantings
-        WHERE is_deleted = FALSE
-        GROUP BY farm_id
-    ) pl ON pl.farm_id = fm.farm_id
-    {$whereSql}
-    ORDER BY fm.farm_name ASC
-    LIMIT {$perPage} OFFSET {$offset}
-";
-$stmt = $pdo->prepare($query);
-$stmt->execute($params);
-$farms = $stmt->fetchAll(PDO::FETCH_ASSOC);
+$totalRecords = $farmModel->count($search, $filterSoil, $filterIrrig);
+$totalPages   = max(1, (int)ceil($totalRecords / $perPage));
+$farms        = $farmModel->getAll($search, $filterSoil, $filterIrrig, $perPage, $offset);
 ?>
 
 <style>

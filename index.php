@@ -12,6 +12,18 @@ require_once __DIR__ . '/config/database.php';
 require_once __DIR__ . '/includes/auth.php';
 requireLogin();
 
+require_once __DIR__ . '/classes/Farmer.php';
+require_once __DIR__ . '/classes/Farm.php';
+require_once __DIR__ . '/classes/Crop.php';
+require_once __DIR__ . '/classes/Planting.php';
+require_once __DIR__ . '/classes/Harvest.php';
+
+$farmerModel   = new Farmer($pdo);
+$farmModel     = new Farm($pdo);
+$cropModel     = new Crop($pdo);
+$plantingModel = new Planting($pdo);
+$harvestModel  = new Harvest($pdo);
+
 require_once __DIR__ . '/includes/header.php';
 
 // Date range filter (Default: Last 12 months)
@@ -24,22 +36,7 @@ $thisMonthEnd   = date('Y-m-t');
 $lastMonthStart = date('Y-m-01', strtotime('-1 month'));
 $lastMonthEnd   = date('Y-m-t', strtotime('-1 month'));
 
-$monthKpiStmt = $pdo->prepare("
-    SELECT
-        COALESCE(SUM(CASE WHEN harvest_date BETWEEN :tm_start AND :tm_end THEN quantity_kg ELSE 0 END), 0) AS tm_kg,
-        COALESCE(SUM(CASE WHEN harvest_date BETWEEN :tm_start AND :tm_end THEN quantity_kg * COALESCE(selling_price_per_kg, 0) ELSE 0 END), 0) AS tm_rev,
-        COALESCE(SUM(CASE WHEN harvest_date BETWEEN :lm_start AND :lm_end THEN quantity_kg ELSE 0 END), 0) AS lm_kg,
-        COALESCE(SUM(CASE WHEN harvest_date BETWEEN :lm_start AND :lm_end THEN quantity_kg * COALESCE(selling_price_per_kg, 0) ELSE 0 END), 0) AS lm_rev
-    FROM harvests
-    WHERE is_deleted = FALSE
-");
-$monthKpiStmt->execute([
-    ':tm_start' => $thisMonthStart,
-    ':tm_end'   => $thisMonthEnd,
-    ':lm_start' => $lastMonthStart,
-    ':lm_end'   => $lastMonthEnd,
-]);
-$mKpi = $monthKpiStmt->fetch(PDO::FETCH_ASSOC);
+$mKpi = $harvestModel->getMonthKpi($thisMonthStart, $thisMonthEnd, $lastMonthStart, $lastMonthEnd);
 
 $tmRev = (float)$mKpi['tm_rev'];
 $lmRev = (float)$mKpi['lm_rev'];
@@ -50,32 +47,16 @@ $lmKg = (float)$mKpi['lm_kg'];
 $kgChangePct = $lmKg > 0 ? (($tmKg - $lmKg) / $lmKg) * 100 : ($tmKg > 0 ? 100 : 0);
 
 // 2. Active Plantings, Harvests Due in 14 days, Average Yield/ha & Total Farmers
-$overviewStmt = $pdo->query("
-    SELECT
-        (SELECT COUNT(*) FROM farmers WHERE is_deleted = FALSE) AS total_farmers,
-        (SELECT COUNT(*) FROM farms WHERE is_deleted = FALSE) AS total_farms,
-        (SELECT COUNT(*) FROM plantings WHERE is_deleted = FALSE AND status_id IN (1, 2)) AS active_plantings,
-        (SELECT COUNT(*) FROM plantings WHERE is_deleted = FALSE AND status_id <> 3
-                AND expected_harvest_date BETWEEN CURRENT_DATE AND CURRENT_DATE + INTERVAL '14 days') AS harvests_due_soon,
-        (SELECT COALESCE(SUM(h.quantity_kg) / NULLIF(SUM(p.area_planted_hectares), 0), 0)
-         FROM harvests h
-         JOIN plantings p ON p.planting_id = h.planting_id
-         WHERE h.is_deleted = FALSE AND p.is_deleted = FALSE) AS avg_yield_per_ha
-");
-$ov = $overviewStmt->fetch(PDO::FETCH_ASSOC);
+$ov = [
+    'total_farmers'     => $farmerModel->countActive(),
+    'total_farms'       => $farmModel->countActive(),
+    'active_plantings'  => $plantingModel->countActiveGrowing(),
+    'harvests_due_soon' => $plantingModel->countHarvestsDueSoon(14),
+    'avg_yield_per_ha'  => $harvestModel->getAvgYieldPerHectare(),
+];
 
 // 3. Chart Data: Monthly Volume (kg) & Revenue (₱) Trends (within selected date range)
-$trendStmt = $pdo->prepare("
-    SELECT TO_CHAR(harvest_date, 'YYYY-MM') AS month_key,
-           COALESCE(SUM(quantity_kg), 0) AS total_kg,
-           COALESCE(SUM(quantity_kg * COALESCE(selling_price_per_kg, 0)), 0) AS total_revenue
-    FROM harvests
-    WHERE is_deleted = FALSE AND harvest_date BETWEEN :start AND :end
-    GROUP BY TO_CHAR(harvest_date, 'YYYY-MM')
-    ORDER BY month_key ASC
-");
-$trendStmt->execute([':start' => $startDate, ':end' => $endDate]);
-$trendRows = $trendStmt->fetchAll(PDO::FETCH_ASSOC);
+$trendRows = $harvestModel->getMonthlyTrends($startDate, $endDate);
 
 $trendLabels  = [];
 $trendVolume  = [];
@@ -87,68 +68,22 @@ foreach ($trendRows as $tr) {
 }
 
 // 4. Chart Data: Top 5 Crops by Yield (kg)
-$topCropsStmt = $pdo->prepare("
-    SELECT c.crop_name, COALESCE(SUM(h.quantity_kg), 0) AS total_kg
-    FROM harvests h
-    JOIN plantings p ON p.planting_id = h.planting_id
-    JOIN crops c ON c.crop_id = p.crop_id
-    WHERE COALESCE(h.is_deleted, FALSE) = FALSE AND h.harvest_date BETWEEN :start AND :end
-    GROUP BY c.crop_id, c.crop_name
-    ORDER BY total_kg DESC
-    LIMIT 5
-");
-$topCropsStmt->execute([':start' => $startDate, ':end' => $endDate]);
-$topCropsRows = $topCropsStmt->fetchAll(PDO::FETCH_ASSOC);
+$topCropsRows = $cropModel->getTopCropsByYield($startDate, $endDate, 5);
 
 $topCropLabels = array_column($topCropsRows, 'crop_name');
 $topCropValues = array_map('floatval', array_column($topCropsRows, 'total_kg'));
 
 // 5. Chart Data: Top 5 Farms by Revenue (₱)
-$topFarmsStmt = $pdo->prepare("
-    SELECT fm.farm_name, COALESCE(SUM(h.quantity_kg * COALESCE(h.selling_price_per_kg, 0)), 0) AS total_revenue
-    FROM harvests h
-    JOIN plantings p ON p.planting_id = h.planting_id
-    JOIN farms fm ON fm.farm_id = p.farm_id
-    WHERE h.is_deleted = FALSE AND h.harvest_date BETWEEN :start AND :end
-    GROUP BY fm.farm_id, fm.farm_name
-    ORDER BY total_revenue DESC
-    LIMIT 5
-");
-$topFarmsStmt->execute([':start' => $startDate, ':end' => $endDate]);
-$topFarmsRows = $topFarmsStmt->fetchAll(PDO::FETCH_ASSOC);
+$topFarmsRows = $farmModel->getTopFarmsByRevenue($startDate, $endDate, 5);
 
 $topFarmLabels = array_column($topFarmsRows, 'farm_name');
 $topFarmValues = array_map('floatval', array_column($topFarmsRows, 'total_revenue'));
 
 // 6. Right Rail: Upcoming Harvests (Live)
-$upcomingStmt = $pdo->query("
-    SELECT p.planting_id, p.expected_harvest_date, c.crop_name, c.variety, fm.farm_name, f.last_name,
-           (p.expected_harvest_date - CURRENT_DATE) AS days_left
-    FROM plantings p
-    JOIN farms fm ON fm.farm_id = p.farm_id
-    JOIN farmers f ON f.farmer_id = fm.farmer_id
-    JOIN crops c ON c.crop_id = p.crop_id
-    WHERE p.is_deleted = FALSE AND p.status_id <> 3
-      AND p.expected_harvest_date IS NOT NULL
-      AND p.expected_harvest_date >= CURRENT_DATE
-    ORDER BY p.expected_harvest_date ASC
-    LIMIT 5
-");
-$upcomingHarvests = $upcomingStmt->fetchAll(PDO::FETCH_ASSOC);
+$upcomingHarvests = $plantingModel->getUpcomingHarvests(5);
 
 // 7. Right Rail: Recent Harvests (Live)
-$recentHarvestsStmt = $pdo->query("
-    SELECT h.harvest_id, h.harvest_date, h.quantity_kg, c.crop_name, fm.farm_name,
-           (h.quantity_kg * COALESCE(h.selling_price_per_kg, 0)) AS total_value
-    FROM harvests h
-    JOIN plantings p ON p.planting_id = h.planting_id
-    JOIN farms fm ON fm.farm_id = p.farm_id
-    JOIN crops c ON c.crop_id = p.crop_id
-    WHERE h.is_deleted = FALSE
-    ORDER BY h.harvest_date DESC, h.harvest_id DESC
-    LIMIT 5
-");
-$recentHarvests = $recentHarvestsStmt->fetchAll(PDO::FETCH_ASSOC);
+$recentHarvests = $harvestModel->getRecentHarvests(5);
 ?>
 
 <div class="page-header">
