@@ -18,7 +18,11 @@ $currentUserId = (int)currentUserId();
 $msg = '';
 $msgType = 'info';
 
-if (isset($_GET['updated'])) {
+if (isset($_SESSION['error'])) {
+    $msg = $_SESSION['error'];
+    $msgType = 'error';
+    unset($_SESSION['error']);
+} elseif (isset($_GET['updated'])) {
     $msg = $_SESSION['flash_msg'] ?? 'Crop updated successfully.';
     $msgType = $_SESSION['flash_type'] ?? 'success';
     unset($_SESSION['flash_msg'], $_SESSION['flash_type']);
@@ -51,47 +55,72 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($cropName === '') {
             $msg = 'Crop name is required.';
             $msgType = 'error';
+            $_SESSION['error'] = $msg;
+        } elseif ((int)($_POST['category_id'] ?? 0) <= 0) {
+            $msg = 'Please select a crop category.';
+            $msgType = 'error';
+            $_SESSION['error'] = $msg;
+        } elseif ((int)($_POST['growing_days'] ?? 0) < 1) {
+            $msg = 'Growing period (days) must be at least 1.';
+            $msgType = 'error';
+            $_SESSION['error'] = $msg;
         } else {
+            // Check for duplicate crop name before inserting
             try {
-                $pdo->beginTransaction();
-                $stmt = $pdo->prepare("
-                    INSERT INTO crops
-                        (crop_name, variety, category_id, growing_days, season_id, is_deleted, created_at, updated_at, created_by, updated_by)
-                    VALUES
-                        (:crop_name, :variety, :cat, :days, :season, FALSE, NOW(), NOW(), :created_by, :updated_by)
-                    RETURNING crop_id
-                ");
-                $stmt->execute([
-                    ':crop_name'   => $cropName,
-                    ':variety'     => $variety ?: null,
-                    ':cat'         => $categoryId,
-                    ':days'        => $growingDays,
-                    ':season'      => $seasonId,
-                    ':created_by'  => $currentUserId,
-                    ':updated_by'  => $currentUserId,
-                ]);
-                $newCropId = (int)$stmt->fetchColumn();
+                $dup = $pdo->prepare("SELECT crop_id FROM crops WHERE LOWER(crop_name) = LOWER(:name) AND is_deleted = FALSE LIMIT 1");
+                $dup->execute([':name' => $cropName]);
+                if ($dup->fetch()) {
+                    $msg = "A crop named '{$cropName}' already exists. Please choose a different name.";
+                    $msgType = 'error';
+                    $_SESSION['error'] = $msg;
+                } else {
+                    $pdo->beginTransaction();
+                    $stmt = $pdo->prepare("
+                        INSERT INTO crops
+                            (crop_name, variety, category_id, growing_days, season_id, is_deleted, created_at, updated_at, created_by, updated_by)
+                        VALUES
+                            (:crop_name, :variety, :cat, :days, :season, FALSE, NOW(), NOW(), :created_by, :updated_by)
+                        RETURNING crop_id
+                    ");
+                    $stmt->execute([
+                        ':crop_name'   => $cropName,
+                        ':variety'     => $variety ?: null,
+                        ':cat'         => $categoryId,
+                        ':days'        => $growingDays,
+                        ':season'      => $seasonId,
+                        ':created_by'  => $currentUserId,
+                        ':updated_by'  => $currentUserId,
+                    ]);
+                    $newCropId = (int)$stmt->fetchColumn();
 
-                $newData = [
-                    'crop_id'      => $newCropId,
-                    'crop_name'    => $cropName,
-                    'variety'      => $variety,
-                    'category_id'  => $categoryId,
-                    'growing_days' => $growingDays,
-                    'season_id'    => $seasonId,
-                ];
+                    $newData = [
+                        'crop_id'      => $newCropId,
+                        'crop_name'    => $cropName,
+                        'variety'      => $variety,
+                        'category_id'  => $categoryId,
+                        'growing_days' => $growingDays,
+                        'season_id'    => $seasonId,
+                    ];
 
-                logActivity($pdo, 'CREATE', 'crops', $newCropId, "Added crop '{$cropName}'", null, $newData);
-                $pdo->commit();
+                    logActivity($pdo, 'CREATE', 'crops', $newCropId, "Added crop '{$cropName}'", null, $newData);
+                    $pdo->commit();
 
-                $_SESSION['flash_msg'] = "Crop '{$cropName}' added successfully.";
-                $_SESSION['flash_type'] = 'success';
-                header('Location: crops.php?created=1');
-                exit;
+                    $_SESSION['flash_msg'] = "Crop '{$cropName}' added successfully.";
+                    $_SESSION['flash_type'] = 'success';
+                    header('Location: crops.php?created=1');
+                    exit;
+                }
             } catch (Throwable $e) {
                 if ($pdo->inTransaction()) $pdo->rollBack();
                 error_log('Crop creation failed: ' . $e->getMessage());
-                $msg = 'Failed to add crop: ' . $e->getMessage();
+                if (strpos($e->getMessage(), '23505') !== false || strpos(strtolower($e->getMessage()), 'unique') !== false) {
+                    $msg = "A crop named '{$cropName}' already exists. Please use a different name.";
+                } elseif (strpos($e->getMessage(), '23502') !== false) {
+                    $msg = 'Please fill out all required crop fields.';
+                } else {
+                    $msg = 'Failed to add crop: ' . $e->getMessage();
+                }
+                $_SESSION['error'] = $msg;
                 $msgType = 'error';
             }
         }
@@ -109,6 +138,15 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         if ($cropId <= 0 || $cropName === '') {
             $msg = 'Valid crop ID and crop name are required.';
             $msgType = 'error';
+            $_SESSION['error'] = $msg;
+        } elseif ((int)($_POST['category_id'] ?? 0) <= 0) {
+            $msg = 'Please select a crop category.';
+            $msgType = 'error';
+            $_SESSION['error'] = $msg;
+        } elseif ((int)($_POST['growing_days'] ?? 0) < 1) {
+            $msg = 'Growing period (days) must be at least 1.';
+            $msgType = 'error';
+            $_SESSION['error'] = $msg;
         } else {
             try {
                 $cur = $pdo->prepare("SELECT * FROM crops WHERE crop_id = :id AND is_deleted = FALSE");
@@ -118,49 +156,66 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (!$oldRow) {
                     $msg = 'Crop not found or already deleted.';
                     $msgType = 'error';
+                    $_SESSION['error'] = $msg;
                 } else {
-                    $pdo->beginTransaction();
-                    $stmt = $pdo->prepare("
-                        UPDATE crops
-                        SET crop_name = :crop_name,
-                            variety = :variety,
-                            category_id = :cat,
-                            growing_days = :days,
-                            season_id = :season,
-                            updated_at = NOW(),
-                            updated_by = :updated_by
-                        WHERE crop_id = :id
-                    ");
-                    $stmt->execute([
-                        ':crop_name'   => $cropName,
-                        ':variety'     => $variety ?: null,
-                        ':cat'         => $categoryId,
-                        ':days'        => $growingDays,
-                        ':season'      => $seasonId,
-                        ':updated_by'  => $currentUserId,
-                        ':id'          => $cropId,
-                    ]);
+                    // Check duplicate crop name
+                    $dup = $pdo->prepare("SELECT crop_id FROM crops WHERE LOWER(crop_name) = LOWER(:name) AND crop_id <> :id AND is_deleted = FALSE LIMIT 1");
+                    $dup->execute([':name' => $cropName, ':id' => $cropId]);
+                    if ($dup->fetch()) {
+                        $msg = "A crop named '{$cropName}' already exists. Please choose a different name.";
+                        $msgType = 'error';
+                        $_SESSION['error'] = $msg;
+                    } else {
+                        $pdo->beginTransaction();
+                        $stmt = $pdo->prepare("
+                            UPDATE crops
+                            SET crop_name = :crop_name,
+                                variety = :variety,
+                                category_id = :cat,
+                                growing_days = :days,
+                                season_id = :season,
+                                updated_at = NOW(),
+                                updated_by = :updated_by
+                            WHERE crop_id = :id
+                        ");
+                        $stmt->execute([
+                            ':crop_name'   => $cropName,
+                            ':variety'     => $variety ?: null,
+                            ':cat'         => $categoryId,
+                            ':days'        => $growingDays,
+                            ':season'      => $seasonId,
+                            ':updated_by'  => $currentUserId,
+                            ':id'          => $cropId,
+                        ]);
 
-                    $newData = [
-                        'crop_name'    => $cropName,
-                        'variety'      => $variety,
-                        'category_id'  => $categoryId,
-                        'growing_days' => $growingDays,
-                        'season_id'    => $seasonId,
-                    ];
+                        $newData = [
+                            'crop_name'    => $cropName,
+                            'variety'      => $variety,
+                            'category_id'  => $categoryId,
+                            'growing_days' => $growingDays,
+                            'season_id'    => $seasonId,
+                        ];
 
-                    logActivity($pdo, 'UPDATE', 'crops', $cropId, "Updated crop '{$cropName}'", $oldRow, $newData);
-                    $pdo->commit();
+                        logActivity($pdo, 'UPDATE', 'crops', $cropId, "Updated crop '{$cropName}'", $oldRow, $newData);
+                        $pdo->commit();
 
-                    $_SESSION['flash_msg'] = "Crop '{$cropName}' updated successfully.";
-                    $_SESSION['flash_type'] = 'success';
-                    header('Location: crops.php?updated=1');
-                    exit;
+                        $_SESSION['flash_msg'] = "Crop '{$cropName}' updated successfully.";
+                        $_SESSION['flash_type'] = 'success';
+                        header('Location: crops.php?updated=1');
+                        exit;
+                    }
                 }
             } catch (Throwable $e) {
                 if ($pdo->inTransaction()) $pdo->rollBack();
                 error_log('Crop update failed: ' . $e->getMessage());
-                $msg = 'Failed to update crop: ' . $e->getMessage();
+                if (strpos($e->getMessage(), '23505') !== false || strpos(strtolower($e->getMessage()), 'unique') !== false) {
+                    $msg = "A crop named '{$cropName}' already exists. Please use a different name.";
+                } elseif (strpos($e->getMessage(), '23502') !== false) {
+                    $msg = 'Please fill out all required crop fields.';
+                } else {
+                    $msg = 'Failed to update crop: ' . $e->getMessage();
+                }
+                $_SESSION['error'] = $msg;
                 $msgType = 'error';
             }
         }
@@ -284,7 +339,7 @@ $crops = $stmt->fetchAll(PDO::FETCH_ASSOC);
 </div>
 
 <?php if ($msg !== ''): ?>
-<div class="card" style="border-left:4px solid <?= $msgType === 'success' ? 'var(--success)' : 'var(--danger)' ?>; padding:0.9rem 1.25rem;">
+<div class="card alert alert-<?= $msgType === 'success' ? 'success' : 'danger' ?>" style="border-left:4px solid <?= $msgType === 'success' ? 'var(--success)' : 'var(--danger)' ?>; padding:0.9rem 1.25rem;">
   <strong style="color:<?= $msgType === 'success' ? 'var(--success)' : 'var(--danger)' ?>;">
     <?= $msgType === 'success' ? '✓ ' : '⚠ ' ?><?= e($msg) ?>
   </strong>
@@ -450,7 +505,7 @@ $crops = $stmt->fetchAll(PDO::FETCH_ASSOC);
       <h3 class="sp-modal-title">Add New Crop</h3>
       <button type="button" class="sp-modal-close" onclick="closeModal('modal-create-crop')">&times;</button>
     </div>
-    <form method="POST" action="crops.php" data-pjax autocomplete="off">
+    <form method="POST" action="crops.php" data-pjax autocomplete="off" novalidate class="needs-validation">
       <input type="hidden" name="action" value="create">
 
       <div class="sp-modal-body">
@@ -458,6 +513,7 @@ $crops = $stmt->fetchAll(PDO::FETCH_ASSOC);
           <div class="form-group">
             <label class="form-label" for="add_crop_name">Crop Name <span style="color:var(--danger)">*</span></label>
             <input type="text" id="add_crop_name" name="crop_name" class="form-control" placeholder="e.g. Rice, Corn, Tomato" required maxlength="150">
+            <div class="invalid-feedback">Crop name is required.</div>
           </div>
           <div class="form-group">
             <label class="form-label" for="add_variety">Variety / Hybrid</label>
@@ -467,17 +523,19 @@ $crops = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
         <div class="form-grid">
           <div class="form-group">
-            <label class="form-label" for="add_category">Category</label>
-            <select id="add_category" name="category_id" class="form-control">
+            <label class="form-label" for="add_category">Category <span style="color:var(--danger)">*</span></label>
+            <select id="add_category" name="category_id" class="form-control" required>
               <option value="">-- Select Category --</option>
               <?php foreach ($activeCategories as $cat): ?>
               <option value="<?= (int)$cat['category_id'] ?>"><?= e($cat['description']) ?></option>
               <?php endforeach; ?>
             </select>
+            <div class="invalid-feedback">Please select a category.</div>
           </div>
           <div class="form-group">
-            <label class="form-label" for="add_days">Growing Period (Days)</label>
-            <input type="number" id="add_days" name="growing_days" class="form-control" min="1" placeholder="e.g. 115">
+            <label class="form-label" for="add_days">Growing Period (Days) <span style="color:var(--danger)">*</span></label>
+            <input type="number" id="add_days" name="growing_days" class="form-control" min="1" step="1" placeholder="e.g. 115" required>
+            <div class="invalid-feedback">Growing period must be at least 1 day.</div>
           </div>
         </div>
 
@@ -507,7 +565,7 @@ $crops = $stmt->fetchAll(PDO::FETCH_ASSOC);
       <h3 class="sp-modal-title">Edit Crop</h3>
       <button type="button" class="sp-modal-close" onclick="closeModal('modal-edit-crop')">&times;</button>
     </div>
-    <form method="POST" action="crops.php" data-pjax autocomplete="off">
+    <form method="POST" action="crops.php" data-pjax autocomplete="off" novalidate class="needs-validation">
       <input type="hidden" name="action" value="update">
       <input type="hidden" id="edit_crop_id" name="crop_id" value="">
 
@@ -516,6 +574,7 @@ $crops = $stmt->fetchAll(PDO::FETCH_ASSOC);
           <div class="form-group">
             <label class="form-label" for="edit_crop_name">Crop Name <span style="color:var(--danger)">*</span></label>
             <input type="text" id="edit_crop_name" name="crop_name" class="form-control" required maxlength="150">
+            <div class="invalid-feedback">Crop name is required.</div>
           </div>
           <div class="form-group">
             <label class="form-label" for="edit_variety">Variety / Hybrid</label>
@@ -525,17 +584,19 @@ $crops = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
         <div class="form-grid">
           <div class="form-group">
-            <label class="form-label" for="edit_category">Category</label>
-            <select id="edit_category" name="category_id" class="form-control">
+            <label class="form-label" for="edit_category">Category <span style="color:var(--danger)">*</span></label>
+            <select id="edit_category" name="category_id" class="form-control" required>
               <option value="">-- Select Category --</option>
               <?php foreach ($activeCategories as $cat): ?>
               <option value="<?= (int)$cat['category_id'] ?>"><?= e($cat['description']) ?></option>
               <?php endforeach; ?>
             </select>
+            <div class="invalid-feedback">Please select a category.</div>
           </div>
           <div class="form-group">
-            <label class="form-label" for="edit_days">Growing Period (Days)</label>
-            <input type="number" id="edit_days" name="growing_days" class="form-control" min="1">
+            <label class="form-label" for="edit_days">Growing Period (Days) <span style="color:var(--danger)">*</span></label>
+            <input type="number" id="edit_days" name="growing_days" class="form-control" min="1" step="1" required>
+            <div class="invalid-feedback">Growing period must be at least 1 day.</div>
           </div>
         </div>
 
@@ -570,9 +631,17 @@ $crops = $stmt->fetchAll(PDO::FETCH_ASSOC);
     document.getElementById('edit_crop_id').value = id;
     document.getElementById('edit_crop_name').value = name;
     document.getElementById('edit_variety').value = variety || '';
-    document.getElementById('edit_category').value = catId || '';
+    const catSel = document.getElementById('edit_category');
+    if (catSel) {
+      catSel.value = catId || '';
+      catSel.dispatchEvent(new Event('change', { bubbles: true }));
+    }
     document.getElementById('edit_days').value = days || '';
-    document.getElementById('edit_season').value = seasonId || '';
+    const sSel = document.getElementById('edit_season');
+    if (sSel) {
+      sSel.value = seasonId || '';
+      sSel.dispatchEvent(new Event('change', { bubbles: true }));
+    }
     if (typeof openModal === 'function') {
       openModal('modal-edit-crop');
     } else {
@@ -583,6 +652,17 @@ $crops = $stmt->fetchAll(PDO::FETCH_ASSOC);
     const el = document.getElementById(id);
     if (el) el.classList.remove('open');
   }
+
+  // Form validation for needs-validation forms
+  document.addEventListener('submit', function(e) {
+    var form = e.target;
+    if (!form.classList.contains('needs-validation')) return;
+    if (!form.checkValidity()) {
+      e.preventDefault();
+      e.stopPropagation();
+      form.classList.add('was-validated');
+    }
+  }, true);
 </script>
 
 <?php require_once __DIR__ . '/includes/footer.php'; ?>

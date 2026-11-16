@@ -18,7 +18,11 @@ $currentUserId = (int)currentUserId();
 $msg = '';
 $msgType = 'info';
 
-if (isset($_GET['updated'])) {
+if (isset($_SESSION['error'])) {
+    $msg = $_SESSION['error'];
+    $msgType = 'error';
+    unset($_SESSION['error']);
+} elseif (isset($_GET['updated'])) {
     $msg = $_SESSION['flash_msg'] ?? 'Farm updated successfully.';
     $msgType = $_SESSION['flash_type'] ?? 'success';
     unset($_SESSION['flash_msg'], $_SESSION['flash_type']);
@@ -49,9 +53,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $soilTypeId   = (int)($_POST['soil_type_id'] ?? 0) ?: null;
         $irrigTypeId  = (int)($_POST['irrigation_type_id'] ?? 0) ?: null;
 
-        if ($farmerId <= 0 || $farmName === '') {
-            $msg = 'Owner farmer and farm name are required.';
+        if ($farmerId <= 0) {
+            $msg = 'Please select an owner farmer.';
             $msgType = 'error';
+            $_SESSION['error'] = $msg;
+        } elseif ($farmName === '') {
+            $msg = 'Farm name is required.';
+            $msgType = 'error';
+            $_SESSION['error'] = $msg;
+        } elseif ($areaHectares < 0.01) {
+            $msg = 'Area must be at least 0.01 hectares.';
+            $msgType = 'error';
+            $_SESSION['error'] = $msg;
+        } elseif ((int)($_POST['irrigation_type_id'] ?? 0) <= 0) {
+            $msg = 'Please select an irrigation type.';
+            $msgType = 'error';
+            $_SESSION['error'] = $msg;
         } else {
             try {
                 $pdo->beginTransaction();
@@ -94,7 +111,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } catch (Throwable $e) {
                 if ($pdo->inTransaction()) $pdo->rollBack();
                 error_log('Farm creation failed: ' . $e->getMessage());
-                $msg = 'Failed to create farm: ' . $e->getMessage();
+                if (strpos($e->getMessage(), '23502') !== false) {
+                    $msg = 'Please fill out all mandatory farm fields before saving.';
+                } elseif (strpos($e->getMessage(), '23505') !== false) {
+                    $msg = 'A farm with this name already exists.';
+                } else {
+                    $msg = 'Failed to create farm: ' . $e->getMessage();
+                }
+                $_SESSION['error'] = $msg;
                 $msgType = 'error';
             }
         }
@@ -110,9 +134,22 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $soilTypeId   = (int)($_POST['soil_type_id'] ?? 0) ?: null;
         $irrigTypeId  = (int)($_POST['irrigation_type_id'] ?? 0) ?: null;
 
-        if ($farmId <= 0 || $farmerId <= 0 || $farmName === '') {
-            $msg = 'Valid farm ID, owner farmer, and farm name are required.';
+        if ($farmId <= 0 || $farmerId <= 0) {
+            $msg = 'Valid farm record and owner farmer are required.';
             $msgType = 'error';
+            $_SESSION['error'] = $msg;
+        } elseif ($farmName === '') {
+            $msg = 'Farm name is required.';
+            $msgType = 'error';
+            $_SESSION['error'] = $msg;
+        } elseif ($areaHectares < 0.01) {
+            $msg = 'Area must be at least 0.01 hectares.';
+            $msgType = 'error';
+            $_SESSION['error'] = $msg;
+        } elseif ((int)($_POST['irrigation_type_id'] ?? 0) <= 0) {
+            $msg = 'Please select an irrigation type.';
+            $msgType = 'error';
+            $_SESSION['error'] = $msg;
         } else {
             try {
                 $cur = $pdo->prepare("SELECT * FROM farms WHERE farm_id = :id AND is_deleted = FALSE");
@@ -122,6 +159,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (!$oldRow) {
                     $msg = 'Farm not found or already deleted.';
                     $msgType = 'error';
+                    $_SESSION['error'] = $msg;
                 } else {
                     $pdo->beginTransaction();
                     $stmt = $pdo->prepare("
@@ -167,7 +205,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } catch (Throwable $e) {
                 if ($pdo->inTransaction()) $pdo->rollBack();
                 error_log('Farm update failed: ' . $e->getMessage());
-                $msg = 'Failed to update farm: ' . $e->getMessage();
+                if (strpos($e->getMessage(), '23502') !== false) {
+                    $msg = 'Please fill out all mandatory farm fields before saving.';
+                } elseif (strpos($e->getMessage(), '23505') !== false) {
+                    $msg = 'A farm with this name already exists.';
+                } else {
+                    $msg = 'Failed to update farm: ' . $e->getMessage();
+                }
+                $_SESSION['error'] = $msg;
                 $msgType = 'error';
             }
         }
@@ -286,6 +331,15 @@ $stmt->execute($params);
 $farms = $stmt->fetchAll(PDO::FETCH_ASSOC);
 ?>
 
+<style>
+.needs-validation .form-control:invalid { border-color: #DC2626; }
+.invalid-feedback { display: none; color: #DC2626; font-size: 0.78rem; margin-top: 0.25rem; }
+.was-validated .form-control:invalid ~ .invalid-feedback { display: block; }
+.was-validated .form-control:invalid { border-color: #DC2626; }
+.was-validated select.form-control:invalid { border-color: #DC2626; }
+.was-validated select.form-control:invalid ~ .invalid-feedback { display: block; }
+</style>
+
 <div class="page-header">
   <div class="page-header-title">
     <h1>Farms</h1>
@@ -299,7 +353,7 @@ $farms = $stmt->fetchAll(PDO::FETCH_ASSOC);
 </div>
 
 <?php if ($msg !== ''): ?>
-<div class="card" style="border-left:4px solid <?= $msgType === 'success' ? 'var(--success)' : 'var(--danger)' ?>; padding:0.9rem 1.25rem;">
+<div class="card alert alert-<?= $msgType === 'success' ? 'success' : 'danger' ?>" style="border-left:4px solid <?= $msgType === 'success' ? 'var(--success)' : 'var(--danger)' ?>; padding:0.9rem 1.25rem;">
   <strong style="color:<?= $msgType === 'success' ? 'var(--success)' : 'var(--danger)' ?>;">
     <?= $msgType === 'success' ? '✓ ' : '⚠ ' ?><?= e($msg) ?>
   </strong>
@@ -464,7 +518,7 @@ $farms = $stmt->fetchAll(PDO::FETCH_ASSOC);
       <h3 class="sp-modal-title">Add New Farm</h3>
       <button type="button" class="sp-modal-close" onclick="closeModal('modal-create-farm')">&times;</button>
     </div>
-    <form method="POST" action="farms.php" data-pjax autocomplete="off">
+    <form method="POST" action="farms.php" data-pjax autocomplete="off" novalidate class="needs-validation">
       <input type="hidden" name="action" value="create">
 
       <div class="sp-modal-body">
@@ -478,16 +532,19 @@ $farms = $stmt->fetchAll(PDO::FETCH_ASSOC);
             </option>
             <?php endforeach; ?>
           </select>
+          <div class="invalid-feedback">Please select an owner farmer.</div>
         </div>
 
         <div class="form-grid">
           <div class="form-group">
             <label class="form-label" for="add_farm_name">Farm Name <span style="color:var(--danger)">*</span></label>
             <input type="text" id="add_farm_name" name="farm_name" class="form-control" placeholder="e.g. Green Valley Farm" required maxlength="150">
+            <div class="invalid-feedback">Farm name is required.</div>
           </div>
           <div class="form-group">
             <label class="form-label" for="add_area">Area (Hectares)</label>
-            <input type="number" id="add_area" name="area_hectares" class="form-control" step="0.01" min="0" placeholder="e.g. 2.50">
+            <input type="number" id="add_area" name="area_hectares" class="form-control" step="0.01" min="0.01" placeholder="e.g. 2.50" required>
+            <div class="invalid-feedback">Area must be at least 0.01 ha.</div>
           </div>
         </div>
 
@@ -508,12 +565,13 @@ $farms = $stmt->fetchAll(PDO::FETCH_ASSOC);
           </div>
           <div class="form-group">
             <label class="form-label" for="add_irrig">Irrigation Type</label>
-            <select id="add_irrig" name="irrigation_type_id" class="form-control">
+            <select id="add_irrig" name="irrigation_type_id" class="form-control" required>
               <option value="">-- Select Irrigation --</option>
               <?php foreach ($activeIrrigs as $i): ?>
               <option value="<?= (int)$i['irrigation_type_id'] ?>"><?= e($i['description']) ?></option>
               <?php endforeach; ?>
             </select>
+            <div class="invalid-feedback">Please select an irrigation type.</div>
           </div>
         </div>
       </div>
@@ -533,7 +591,7 @@ $farms = $stmt->fetchAll(PDO::FETCH_ASSOC);
       <h3 class="sp-modal-title">Edit Farm Information</h3>
       <button type="button" class="sp-modal-close" onclick="closeModal('modal-edit-farm')">&times;</button>
     </div>
-    <form method="POST" action="farms.php" data-pjax autocomplete="off">
+    <form method="POST" action="farms.php" data-pjax autocomplete="off" novalidate class="needs-validation">
       <input type="hidden" name="action" value="update">
       <input type="hidden" id="edit_farm_id" name="farm_id" value="">
 
@@ -541,22 +599,26 @@ $farms = $stmt->fetchAll(PDO::FETCH_ASSOC);
         <div class="form-group">
           <label class="form-label" for="edit_farmer_id">Owner Farmer <span style="color:var(--danger)">*</span></label>
           <select id="edit_farmer_id" name="farmer_id" class="form-control" required>
+            <option value="">-- Select Farmer --</option>
             <?php foreach ($activeFarmers as $f): ?>
             <option value="<?= (int)$f['farmer_id'] ?>">
               <?= e($f['last_name'] . ', ' . $f['first_name']) ?>
             </option>
             <?php endforeach; ?>
           </select>
+          <div class="invalid-feedback">Please select an owner farmer.</div>
         </div>
 
         <div class="form-grid">
           <div class="form-group">
             <label class="form-label" for="edit_farm_name">Farm Name <span style="color:var(--danger)">*</span></label>
             <input type="text" id="edit_farm_name" name="farm_name" class="form-control" required maxlength="150">
+            <div class="invalid-feedback">Farm name is required.</div>
           </div>
           <div class="form-group">
             <label class="form-label" for="edit_area">Area (Hectares)</label>
-            <input type="number" id="edit_area" name="area_hectares" class="form-control" step="0.01" min="0">
+            <input type="number" id="edit_area" name="area_hectares" class="form-control" step="0.01" min="0.01" required>
+            <div class="invalid-feedback">Area must be at least 0.01 ha.</div>
           </div>
         </div>
 
@@ -577,12 +639,13 @@ $farms = $stmt->fetchAll(PDO::FETCH_ASSOC);
           </div>
           <div class="form-group">
             <label class="form-label" for="edit_irrig">Irrigation Type</label>
-            <select id="edit_irrig" name="irrigation_type_id" class="form-control">
+            <select id="edit_irrig" name="irrigation_type_id" class="form-control" required>
               <option value="">-- Select Irrigation --</option>
               <?php foreach ($activeIrrigs as $i): ?>
               <option value="<?= (int)$i['irrigation_type_id'] ?>"><?= e($i['description']) ?></option>
               <?php endforeach; ?>
             </select>
+            <div class="invalid-feedback">Please select an irrigation type.</div>
           </div>
         </div>
       </div>
@@ -621,6 +684,17 @@ $farms = $stmt->fetchAll(PDO::FETCH_ASSOC);
     const el = document.getElementById(id);
     if (el) el.classList.remove('open');
   }
+
+  // Bootstrap 5-style needs-validation handler
+  document.addEventListener('submit', function(e) {
+    var form = e.target;
+    if (!form.classList.contains('needs-validation')) return;
+    if (!form.checkValidity()) {
+      e.preventDefault();
+      e.stopPropagation();
+      form.classList.add('was-validated');
+    }
+  }, true);
 </script>
 
 <?php require_once __DIR__ . '/includes/footer.php'; ?>

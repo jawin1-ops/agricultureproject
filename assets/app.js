@@ -438,6 +438,20 @@
   document.addEventListener('submit', (e) => {
     const form = e.target;
 
+    // Bootstrap 5 Client-Side Validation (.needs-validation)
+    if (form.classList && form.classList.contains('needs-validation')) {
+      if (!form.checkValidity()) {
+        e.preventDefault();
+        e.stopPropagation();
+        form.classList.add('was-validated');
+        const firstInvalid = form.querySelector(':invalid');
+        if (firstInvalid) {
+          firstInvalid.focus();
+        }
+        return;
+      }
+    }
+
     // Delete confirmation modal interception
     if (form.hasAttribute('data-confirm-delete') || form.hasAttribute('data-confirm')) {
       e.preventDefault();

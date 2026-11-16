@@ -381,7 +381,7 @@ $items = $listStmt->fetchAll(PDO::FETCH_ASSOC);
       <h2 class="card-title">Add New <?= e($currentConfig['singular']) ?></h2>
     </div>
 
-    <form method="POST" action="settings.php?tab=<?= urlencode($activeTab) ?>" data-pjax autocomplete="off">
+    <form method="POST" action="settings.php?tab=<?= urlencode($activeTab) ?>" data-pjax autocomplete="off" novalidate class="needs-validation">
       <input type="hidden" name="action" value="create">
 
       <div class="form-group">
@@ -390,6 +390,7 @@ $items = $listStmt->fetchAll(PDO::FETCH_ASSOC);
         </label>
         <input type="text" id="description" name="description" class="form-control"
                placeholder="e.g. Organic Compost or Grade A" required maxlength="100">
+        <div class="invalid-feedback">Please enter a name or label for this <?= e(strtolower($currentConfig['singular'])) ?>.</div>
         <span class="form-hint">Must be unique across active and archived records.</span>
       </div>
 
@@ -408,14 +409,15 @@ $items = $listStmt->fetchAll(PDO::FETCH_ASSOC);
       <h3 class="sp-modal-title">Edit <?= e($currentConfig['singular']) ?></h3>
       <button type="button" class="sp-modal-close" onclick="closeEditModal()">&times;</button>
     </div>
-    <form method="POST" action="settings.php?tab=<?= urlencode($activeTab) ?>" data-pjax autocomplete="off">
+    <form method="POST" action="settings.php?tab=<?= urlencode($activeTab) ?>" data-pjax autocomplete="off" novalidate class="needs-validation">
       <input type="hidden" name="action" value="update">
       <input type="hidden" id="edit-lookup-id" name="id" value="">
 
       <div class="sp-modal-body">
         <div class="form-group">
-          <label class="form-label" for="edit-lookup-desc">Description</label>
+          <label class="form-label" for="edit-lookup-desc">Description <span style="color:var(--danger)">*</span></label>
           <input type="text" id="edit-lookup-desc" name="description" class="form-control" required maxlength="100">
+          <div class="invalid-feedback">Description cannot be blank.</div>
           <span class="form-hint">Modifying this will update how historical records display this classification.</span>
         </div>
       </div>
@@ -442,6 +444,24 @@ $items = $listStmt->fetchAll(PDO::FETCH_ASSOC);
     const el = document.getElementById('edit-lookup-modal-backdrop');
     if (el) el.classList.remove('open');
   }
+
+  // Bootstrap 5-style needs-validation handler
+  document.addEventListener('submit', function(e) {
+    var form = e.target;
+    if (!form.classList.contains('needs-validation')) return;
+    if (!form.checkValidity()) {
+      e.preventDefault();
+      e.stopPropagation();
+      form.classList.add('was-validated');
+    }
+  }, true);
 </script>
+
+<style>
+.needs-validation .form-control:invalid { border-color: #DC2626; }
+.invalid-feedback { display: none; color: #DC2626; font-size: 0.78rem; margin-top: 0.25rem; }
+.was-validated .form-control:invalid ~ .invalid-feedback { display: block; }
+.was-validated .form-control:invalid { border-color: #DC2626; }
+</style>
 
 <?php require_once __DIR__ . '/includes/footer.php'; ?>

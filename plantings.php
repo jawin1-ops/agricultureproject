@@ -18,7 +18,11 @@ $currentUserId = (int)currentUserId();
 $msg = '';
 $msgType = 'info';
 
-if (isset($_GET['updated'])) {
+if (isset($_SESSION['error'])) {
+    $msg = $_SESSION['error'];
+    $msgType = 'error';
+    unset($_SESSION['error']);
+} elseif (isset($_GET['updated'])) {
     $msg = $_SESSION['flash_msg'] ?? 'Planting cycle updated successfully.';
     $msgType = $_SESSION['flash_type'] ?? 'success';
     unset($_SESSION['flash_msg'], $_SESSION['flash_type']);
@@ -50,12 +54,34 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $expectedDate = trim((string)($_POST['expected_harvest_date'] ?? ''));
         $statusId     = (int)($_POST['status_id'] ?? 1); // Default: 1 (Planted)
 
-        if ($farmId <= 0 || $cropId <= 0 || $plantingDate === '') {
-            $msg = 'Farm, Crop, and Planting Date are required.';
+        if ($farmId <= 0) {
+            $msg = 'Please select a target farm.';
             $msgType = 'error';
-        } elseif ($expectedDate !== '' && strtotime($expectedDate) <= strtotime($plantingDate)) {
-            $msg = 'Expected Harvest Date must be strictly after the Planting Date.';
+            $_SESSION['error'] = $msg;
+        } elseif ($cropId <= 0) {
+            $msg = 'Please select a crop.';
             $msgType = 'error';
+            $_SESSION['error'] = $msg;
+        } elseif ($plantingDate === '') {
+            $msg = 'Planting date is required.';
+            $msgType = 'error';
+            $_SESSION['error'] = $msg;
+        } elseif ($expectedDate === '') {
+            $msg = 'Expected harvest date is required.';
+            $msgType = 'error';
+            $_SESSION['error'] = $msg;
+        } elseif (strtotime($expectedDate) < strtotime($plantingDate)) {
+            $msg = 'Expected harvest date cannot be earlier than planting date.';
+            $msgType = 'error';
+            $_SESSION['error'] = $msg;
+        } elseif ($areaPlanted < 0.01) {
+            $msg = 'Area planted must be at least 0.01 hectares.';
+            $msgType = 'error';
+            $_SESSION['error'] = $msg;
+        } elseif ($statusId <= 0) {
+            $msg = 'Please select a valid planting status.';
+            $msgType = 'error';
+            $_SESSION['error'] = $msg;
         } else {
             try {
                 $pdo->beginTransaction();
@@ -102,7 +128,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } catch (Throwable $e) {
                 if ($pdo->inTransaction()) $pdo->rollBack();
                 error_log('Planting creation failed: ' . $e->getMessage());
-                $msg = 'Failed to create planting: ' . $e->getMessage();
+                if (strpos($e->getMessage(), '23502') !== false) {
+                    $msg = 'Please fill out all mandatory planting fields.';
+                } else {
+                    $msg = 'Failed to create planting: ' . $e->getMessage();
+                }
+                $_SESSION['error'] = $msg;
                 $msgType = 'error';
             }
         }
@@ -119,12 +150,38 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $expectedDate = trim((string)($_POST['expected_harvest_date'] ?? ''));
         $statusId     = (int)($_POST['status_id'] ?? 1);
 
-        if ($plantingId <= 0 || $farmId <= 0 || $cropId <= 0 || $plantingDate === '') {
-            $msg = 'Valid planting ID, Farm, Crop, and Planting Date are required.';
+        if ($plantingId <= 0) {
+            $msg = 'Valid planting record is required.';
             $msgType = 'error';
-        } elseif ($expectedDate !== '' && strtotime($expectedDate) <= strtotime($plantingDate)) {
-            $msg = 'Expected Harvest Date must be strictly after the Planting Date.';
+            $_SESSION['error'] = $msg;
+        } elseif ($farmId <= 0) {
+            $msg = 'Please select a target farm.';
             $msgType = 'error';
+            $_SESSION['error'] = $msg;
+        } elseif ($cropId <= 0) {
+            $msg = 'Please select a crop.';
+            $msgType = 'error';
+            $_SESSION['error'] = $msg;
+        } elseif ($plantingDate === '') {
+            $msg = 'Planting date is required.';
+            $msgType = 'error';
+            $_SESSION['error'] = $msg;
+        } elseif ($expectedDate === '') {
+            $msg = 'Expected harvest date is required.';
+            $msgType = 'error';
+            $_SESSION['error'] = $msg;
+        } elseif (strtotime($expectedDate) < strtotime($plantingDate)) {
+            $msg = 'Expected harvest date cannot be earlier than planting date.';
+            $msgType = 'error';
+            $_SESSION['error'] = $msg;
+        } elseif ($areaPlanted < 0.01) {
+            $msg = 'Area planted must be at least 0.01 hectares.';
+            $msgType = 'error';
+            $_SESSION['error'] = $msg;
+        } elseif ($statusId <= 0) {
+            $msg = 'Please select a valid planting status.';
+            $msgType = 'error';
+            $_SESSION['error'] = $msg;
         } else {
             try {
                 $cur = $pdo->prepare("SELECT * FROM plantings WHERE planting_id = :id AND is_deleted = FALSE");
@@ -134,6 +191,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (!$oldRow) {
                     $msg = 'Planting record not found or already deleted.';
                     $msgType = 'error';
+                    $_SESSION['error'] = $msg;
                 } else {
                     $pdo->beginTransaction();
                     $stmt = $pdo->prepare("
@@ -231,7 +289,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } catch (Throwable $e) {
                 if ($pdo->inTransaction()) $pdo->rollBack();
                 error_log('Planting update failed: ' . $e->getMessage());
-                $msg = 'Failed to update planting: ' . $e->getMessage();
+                if (strpos($e->getMessage(), '23502') !== false) {
+                    $msg = 'Please fill out all mandatory planting fields.';
+                } else {
+                    $msg = 'Failed to update planting: ' . $e->getMessage();
+                }
+                $_SESSION['error'] = $msg;
                 $msgType = 'error';
             }
         }
@@ -387,7 +450,7 @@ $plantings = $stmt->fetchAll(PDO::FETCH_ASSOC);
 </div>
 
 <?php if ($msg !== ''): ?>
-<div class="card" style="border-left:4px solid <?= $msgType === 'success' ? 'var(--success)' : 'var(--danger)' ?>; padding:0.9rem 1.25rem;">
+<div class="card alert alert-<?= $msgType === 'success' ? 'success' : 'danger' ?>" style="border-left:4px solid <?= $msgType === 'success' ? 'var(--success)' : 'var(--danger)' ?>; padding:0.9rem 1.25rem;">
   <strong style="color:<?= $msgType === 'success' ? 'var(--success)' : 'var(--danger)' ?>;">
     <?= $msgType === 'success' ? '✓ ' : '⚠ ' ?><?= e($msg) ?>
   </strong>
@@ -579,7 +642,7 @@ $plantings = $stmt->fetchAll(PDO::FETCH_ASSOC);
       <h3 class="sp-modal-title">Record New Planting</h3>
       <button type="button" class="sp-modal-close" onclick="closeModal('modal-create-planting')">&times;</button>
     </div>
-    <form method="POST" action="plantings.php" data-pjax autocomplete="off">
+    <form method="POST" action="plantings.php" data-pjax autocomplete="off" novalidate class="needs-validation">
       <input type="hidden" name="action" value="create">
 
       <div class="sp-modal-body">
@@ -593,6 +656,7 @@ $plantings = $stmt->fetchAll(PDO::FETCH_ASSOC);
             </option>
             <?php endforeach; ?>
           </select>
+          <div class="invalid-feedback">Please select a farm.</div>
         </div>
 
         <div class="form-group">
@@ -605,24 +669,28 @@ $plantings = $stmt->fetchAll(PDO::FETCH_ASSOC);
             </option>
             <?php endforeach; ?>
           </select>
+          <div class="invalid-feedback">Please select a crop.</div>
         </div>
 
         <div class="form-grid">
           <div class="form-group">
             <label class="form-label" for="add_p_date">Planting Date <span style="color:var(--danger)">*</span></label>
             <input type="date" id="add_p_date" name="planting_date" class="form-control" value="<?= date('Y-m-d') ?>" required>
+            <div class="invalid-feedback">Planting date is required.</div>
           </div>
           <div class="form-group">
-            <label class="form-label" for="add_exp_date">Expected Harvest Date</label>
-            <input type="date" id="add_exp_date" name="expected_harvest_date" class="form-control">
-            <span class="form-hint">Must be later than planting date.</span>
+            <label class="form-label" for="add_exp_date">Expected Harvest Date <span style="color:var(--danger)">*</span></label>
+            <input type="date" id="add_exp_date" name="expected_harvest_date" class="form-control" required>
+            <div class="invalid-feedback">Expected harvest date is required and cannot be earlier than planting date.</div>
+            <span class="form-hint">Must not be earlier than planting date.</span>
           </div>
         </div>
 
         <div class="form-grid">
           <div class="form-group">
-            <label class="form-label" for="add_area_planted">Area Planted (Hectares)</label>
-            <input type="number" id="add_area_planted" name="area_planted_hectares" class="form-control" step="0.01" min="0" placeholder="e.g. 1.25">
+            <label class="form-label" for="add_area_planted">Area Planted (Hectares) <span style="color:var(--danger)">*</span></label>
+            <input type="number" id="add_area_planted" name="area_planted_hectares" class="form-control" step="0.01" min="0.01" placeholder="e.g. 1.25" required>
+            <div class="invalid-feedback">Area planted must be at least 0.01 ha.</div>
           </div>
           <div class="form-group">
             <label class="form-label" for="add_seeds">Seed Quantity (kg)</label>
@@ -631,14 +699,16 @@ $plantings = $stmt->fetchAll(PDO::FETCH_ASSOC);
         </div>
 
         <div class="form-group">
-          <label class="form-label" for="add_status">Current Status</label>
+          <label class="form-label" for="add_status">Current Status <span style="color:var(--danger)">*</span></label>
           <select id="add_status" name="status_id" class="form-control" required>
+            <option value="">-- Select Status --</option>
             <?php foreach ($activeStatuses as $st): ?>
             <option value="<?= (int)$st['status_id'] ?>" <?= (int)$st['status_id'] === 1 ? 'selected' : '' ?>>
               <?= e($st['description']) ?>
             </option>
             <?php endforeach; ?>
           </select>
+          <div class="invalid-feedback">Please select a status.</div>
         </div>
       </div>
 
@@ -657,7 +727,7 @@ $plantings = $stmt->fetchAll(PDO::FETCH_ASSOC);
       <h3 class="sp-modal-title">Edit Planting Cycle</h3>
       <button type="button" class="sp-modal-close" onclick="closeModal('modal-edit-planting')">&times;</button>
     </div>
-    <form method="POST" action="plantings.php" data-pjax autocomplete="off">
+    <form method="POST" action="plantings.php" data-pjax autocomplete="off" novalidate class="needs-validation">
       <input type="hidden" name="action" value="update">
       <input type="hidden" id="edit_planting_id" name="planting_id" value="">
 
@@ -665,40 +735,47 @@ $plantings = $stmt->fetchAll(PDO::FETCH_ASSOC);
         <div class="form-group">
           <label class="form-label" for="edit_farm_id">Target Farm <span style="color:var(--danger)">*</span></label>
           <select id="edit_farm_id" name="farm_id" class="form-control" required>
+            <option value="">-- Select Farm --</option>
             <?php foreach ($activeFarms as $fm): ?>
             <option value="<?= (int)$fm['farm_id'] ?>">
               <?= e($fm['farm_name']) ?> (Owner: <?= e($fm['last_name'] . ', ' . $fm['first_name']) ?>)
             </option>
             <?php endforeach; ?>
           </select>
+          <div class="invalid-feedback">Please select a farm.</div>
         </div>
 
         <div class="form-group">
           <label class="form-label" for="edit_crop_id">Crop <span style="color:var(--danger)">*</span></label>
           <select id="edit_crop_id" name="crop_id" class="form-control" required>
+            <option value="">-- Select Crop --</option>
             <?php foreach ($activeCrops as $cp): ?>
             <option value="<?= (int)$cp['crop_id'] ?>">
               <?= e($cp['crop_name']) ?><?= $cp['variety'] ? ' (' . e($cp['variety']) . ')' : '' ?>
             </option>
             <?php endforeach; ?>
           </select>
+          <div class="invalid-feedback">Please select a crop.</div>
         </div>
 
         <div class="form-grid">
           <div class="form-group">
             <label class="form-label" for="edit_p_date">Planting Date <span style="color:var(--danger)">*</span></label>
             <input type="date" id="edit_p_date" name="planting_date" class="form-control" required>
+            <div class="invalid-feedback">Planting date is required.</div>
           </div>
           <div class="form-group">
-            <label class="form-label" for="edit_exp_date">Expected Harvest Date</label>
-            <input type="date" id="edit_exp_date" name="expected_harvest_date" class="form-control">
+            <label class="form-label" for="edit_exp_date">Expected Harvest Date <span style="color:var(--danger)">*</span></label>
+            <input type="date" id="edit_exp_date" name="expected_harvest_date" class="form-control" required>
+            <div class="invalid-feedback">Expected harvest date is required and cannot be earlier than planting date.</div>
           </div>
         </div>
 
         <div class="form-grid">
           <div class="form-group">
-            <label class="form-label" for="edit_area_planted">Area Planted (Hectares)</label>
-            <input type="number" id="edit_area_planted" name="area_planted_hectares" class="form-control" step="0.01" min="0">
+            <label class="form-label" for="edit_area_planted">Area Planted (Hectares) <span style="color:var(--danger)">*</span></label>
+            <input type="number" id="edit_area_planted" name="area_planted_hectares" class="form-control" step="0.01" min="0.01" required>
+            <div class="invalid-feedback">Area planted must be at least 0.01 ha.</div>
           </div>
           <div class="form-group">
             <label class="form-label" for="edit_seeds">Seed Quantity (kg)</label>
@@ -707,14 +784,16 @@ $plantings = $stmt->fetchAll(PDO::FETCH_ASSOC);
         </div>
 
         <div class="form-group">
-          <label class="form-label" for="edit_status">Current Status</label>
+          <label class="form-label" for="edit_status">Current Status <span style="color:var(--danger)">*</span></label>
           <select id="edit_status" name="status_id" class="form-control" required>
+            <option value="">-- Select Status --</option>
             <?php foreach ($activeStatuses as $st): ?>
             <option value="<?= (int)$st['status_id'] ?>">
               <?= e($st['description']) ?>
             </option>
             <?php endforeach; ?>
           </select>
+          <div class="invalid-feedback">Please select a status.</div>
         </div>
       </div>
 
@@ -727,6 +806,26 @@ $plantings = $stmt->fetchAll(PDO::FETCH_ASSOC);
 </div>
 
 <script>
+  function validatePlantingDates(pDateId, expDateId) {
+    const pDateInput = document.getElementById(pDateId);
+    const expDateInput = document.getElementById(expDateId);
+    if (!pDateInput || !expDateInput) return;
+    if (pDateInput.value && expDateInput.value) {
+      if (expDateInput.value < pDateInput.value) {
+        expDateInput.setCustomValidity('Expected harvest date cannot be earlier than planting date.');
+      } else {
+        expDateInput.setCustomValidity('');
+      }
+    } else {
+      expDateInput.setCustomValidity('');
+    }
+  }
+
+  document.getElementById('add_p_date')?.addEventListener('input', () => validatePlantingDates('add_p_date', 'add_exp_date'));
+  document.getElementById('add_exp_date')?.addEventListener('input', () => validatePlantingDates('add_p_date', 'add_exp_date'));
+  document.getElementById('edit_p_date')?.addEventListener('input', () => validatePlantingDates('edit_p_date', 'edit_exp_date'));
+  document.getElementById('edit_exp_date')?.addEventListener('input', () => validatePlantingDates('edit_p_date', 'edit_exp_date'));
+
   function openCreatePlantingModal() {
     if (typeof openModal === 'function') {
       openModal('modal-create-planting');
@@ -736,13 +835,26 @@ $plantings = $stmt->fetchAll(PDO::FETCH_ASSOC);
   }
   function openEditPlantingModal(id, farmId, cropId, pDate, area, seeds, expDate, statusId) {
     document.getElementById('edit_planting_id').value = id;
-    document.getElementById('edit_farm_id').value = farmId;
-    document.getElementById('edit_crop_id').value = cropId;
+    const fSel = document.getElementById('edit_farm_id');
+    if (fSel) {
+      fSel.value = farmId;
+      fSel.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    const cSel = document.getElementById('edit_crop_id');
+    if (cSel) {
+      cSel.value = cropId;
+      cSel.dispatchEvent(new Event('change', { bubbles: true }));
+    }
     document.getElementById('edit_p_date').value = pDate;
     document.getElementById('edit_area_planted').value = area || '';
     document.getElementById('edit_seeds').value = seeds || '';
     document.getElementById('edit_exp_date').value = expDate || '';
-    document.getElementById('edit_status').value = statusId;
+    const sSel = document.getElementById('edit_status');
+    if (sSel) {
+      sSel.value = statusId;
+      sSel.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    validatePlantingDates('edit_p_date', 'edit_exp_date');
     if (typeof openModal === 'function') {
       openModal('modal-edit-planting');
     } else {
@@ -753,6 +865,23 @@ $plantings = $stmt->fetchAll(PDO::FETCH_ASSOC);
     const el = document.getElementById(id);
     if (el) el.classList.remove('open');
   }
+
+  // Form validation for needs-validation forms
+  document.addEventListener('submit', function(e) {
+    var form = e.target;
+    if (!form.classList.contains('needs-validation')) return;
+    if (form.id === 'modal-create-planting' || form.closest('#modal-create-planting')) {
+      validatePlantingDates('add_p_date', 'add_exp_date');
+    }
+    if (form.id === 'modal-edit-planting' || form.closest('#modal-edit-planting')) {
+      validatePlantingDates('edit_p_date', 'edit_exp_date');
+    }
+    if (!form.checkValidity()) {
+      e.preventDefault();
+      e.stopPropagation();
+      form.classList.add('was-validated');
+    }
+  }, true);
 </script>
 
 <?php require_once __DIR__ . '/includes/footer.php'; ?>

@@ -18,7 +18,11 @@ $currentUserId = (int)currentUserId();
 $msg = '';
 $msgType = 'info';
 
-if (isset($_GET['updated'])) {
+if (isset($_SESSION['error'])) {
+    $msg = $_SESSION['error'];
+    $msgType = 'error';
+    unset($_SESSION['error']);
+} elseif (isset($_GET['updated'])) {
     $msg = $_SESSION['flash_msg'] ?? 'Farmer updated successfully.';
     $msgType = $_SESSION['flash_type'] ?? 'success';
     unset($_SESSION['flash_msg'], $_SESSION['flash_type']);
@@ -36,40 +40,95 @@ if (isset($_GET['updated'])) {
     unset($_SESSION['flash_msg'], $_SESSION['flash_type']);
 }
 
+// Check if barangay_id column exists on farmers table
+$hasBarangayCol = false;
+try {
+    $colChk = $pdo->query("SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'farmers' AND column_name = 'barangay_id'")->fetchColumn();
+    $hasBarangayCol = (bool)$colChk;
+} catch (Throwable $e) {}
+
+// Fetch active barangays lookup if table exists, otherwise fallback to defaults
+$activeBarangays = [];
+try {
+    $bStmt = $pdo->query("SELECT to_regclass('public.barangays')");
+    if ($bStmt && $bStmt->fetchColumn()) {
+        $activeBarangays = $pdo->query("SELECT barangay_id, barangay_name FROM barangays ORDER BY barangay_name ASC")->fetchAll(PDO::FETCH_ASSOC);
+    }
+} catch (Throwable $e) {}
+if (empty($activeBarangays)) {
+    $activeBarangays = [
+        ['barangay_id' => 1, 'barangay_name' => 'Barangay 1 (Poblacion)'],
+        ['barangay_id' => 2, 'barangay_name' => 'Barangay 2 (San Isidro)'],
+        ['barangay_id' => 3, 'barangay_name' => 'Barangay 3 (San Roque)'],
+        ['barangay_id' => 4, 'barangay_name' => 'Barangay 4 (Santa Maria)'],
+        ['barangay_id' => 5, 'barangay_name' => 'Barangay 5 (Santo Niño)']
+    ];
+}
+
 // Handle POST actions (Create, Update, Soft Delete)
 if ($_SERVER['REQUEST_METHOD'] === 'POST') {
     $action = $_POST['action'] ?? '';
 
     // 1. ADD FARMER
     if ($action === 'create') {
-        $firstName = trim((string)($_POST['first_name'] ?? ''));
-        $lastName  = trim((string)($_POST['last_name'] ?? ''));
-        $contactNo = trim((string)($_POST['contact_no'] ?? ''));
-        $address   = trim((string)($_POST['address'] ?? ''));
-        $regDate   = trim((string)($_POST['registration_date'] ?? date('Y-m-d')));
+        $firstName  = trim((string)($_POST['first_name'] ?? ''));
+        $lastName   = trim((string)($_POST['last_name'] ?? ''));
+        $contactNo  = trim((string)($_POST['contact_no'] ?? ''));
+        $barangayId = (int)($_POST['barangay_id'] ?? 0);
+        $address    = trim((string)($_POST['address'] ?? ''));
+        $regDate    = trim((string)($_POST['registration_date'] ?? date('Y-m-d')));
 
-        if ($firstName === '' || $lastName === '') {
-            $msg = 'First name and last name are required.';
+        if ($firstName === '') {
+            $msg = 'First name is required.';
             $msgType = 'error';
+            $_SESSION['error'] = $msg;
+        } elseif ($lastName === '') {
+            $msg = 'Last name is required.';
+            $msgType = 'error';
+            $_SESSION['error'] = $msg;
+        } elseif ($barangayId <= 0) {
+            $msg = 'Please select a barangay.';
+            $msgType = 'error';
+            $_SESSION['error'] = $msg;
         } else {
             try {
                 $pdo->beginTransaction();
-                $stmt = $pdo->prepare("
-                    INSERT INTO farmers
-                        (first_name, last_name, contact_no, address, registration_date, is_deleted, created_at, updated_at, created_by, updated_by)
-                    VALUES
-                        (:first_name, :last_name, :contact_no, :address, :reg_date, FALSE, NOW(), NOW(), :created_by, :updated_by)
-                    RETURNING farmer_id
-                ");
-                $stmt->execute([
-                    ':first_name' => $firstName,
-                    ':last_name'  => $lastName,
-                    ':contact_no' => $contactNo ?: null,
-                    ':address'    => $address ?: null,
-                    ':reg_date'   => $regDate ?: date('Y-m-d'),
-                    ':created_by' => $currentUserId,
-                    ':updated_by' => $currentUserId,
-                ]);
+                if ($hasBarangayCol) {
+                    $stmt = $pdo->prepare("
+                        INSERT INTO farmers
+                            (first_name, last_name, contact_no, address, barangay_id, registration_date, is_deleted, created_at, updated_at, created_by, updated_by)
+                        VALUES
+                            (:first_name, :last_name, :contact_no, :address, :barangay_id, :reg_date, FALSE, NOW(), NOW(), :created_by, :updated_by)
+                        RETURNING farmer_id
+                    ");
+                    $stmt->execute([
+                        ':first_name'  => $firstName,
+                        ':last_name'   => $lastName,
+                        ':contact_no'  => $contactNo ?: null,
+                        ':address'     => $address ?: null,
+                        ':barangay_id' => $barangayId,
+                        ':reg_date'    => $regDate ?: date('Y-m-d'),
+                        ':created_by'  => $currentUserId,
+                        ':updated_by'  => $currentUserId,
+                    ]);
+                } else {
+                    $stmt = $pdo->prepare("
+                        INSERT INTO farmers
+                            (first_name, last_name, contact_no, address, registration_date, is_deleted, created_at, updated_at, created_by, updated_by)
+                        VALUES
+                            (:first_name, :last_name, :contact_no, :address, :reg_date, FALSE, NOW(), NOW(), :created_by, :updated_by)
+                        RETURNING farmer_id
+                    ");
+                    $stmt->execute([
+                        ':first_name' => $firstName,
+                        ':last_name'  => $lastName,
+                        ':contact_no' => $contactNo ?: null,
+                        ':address'    => $address ?: null,
+                        ':reg_date'   => $regDate ?: date('Y-m-d'),
+                        ':created_by' => $currentUserId,
+                        ':updated_by' => $currentUserId,
+                    ]);
+                }
                 $newFarmerId = (int)$stmt->fetchColumn();
 
                 $newData = [
@@ -77,6 +136,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                     'first_name'        => $firstName,
                     'last_name'         => $lastName,
                     'contact_no'        => $contactNo,
+                    'barangay_id'       => $barangayId,
                     'address'           => $address,
                     'registration_date' => $regDate,
                 ];
@@ -91,7 +151,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } catch (Throwable $e) {
                 if ($pdo->inTransaction()) $pdo->rollBack();
                 error_log('Farmer creation failed: ' . $e->getMessage());
-                $msg = 'Failed to register farmer: ' . $e->getMessage();
+                if (strpos($e->getMessage(), '23502') !== false) {
+                    $msg = 'Please fill out all mandatory fields before saving.';
+                } elseif (strpos($e->getMessage(), '23505') !== false) {
+                    $msg = 'A farmer with these unique details already exists.';
+                } else {
+                    $msg = 'Failed to register farmer: ' . $e->getMessage();
+                }
+                $_SESSION['error'] = $msg;
                 $msgType = 'error';
             }
         }
@@ -99,16 +166,30 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
 
     // 2. UPDATE FARMER
     elseif ($action === 'update') {
-        $farmerId  = (int)($_POST['farmer_id'] ?? 0);
-        $firstName = trim((string)($_POST['first_name'] ?? ''));
-        $lastName  = trim((string)($_POST['last_name'] ?? ''));
-        $contactNo = trim((string)($_POST['contact_no'] ?? ''));
-        $address   = trim((string)($_POST['address'] ?? ''));
-        $regDate   = trim((string)($_POST['registration_date'] ?? date('Y-m-d')));
+        $farmerId   = (int)($_POST['farmer_id'] ?? 0);
+        $firstName  = trim((string)($_POST['first_name'] ?? ''));
+        $lastName   = trim((string)($_POST['last_name'] ?? ''));
+        $contactNo  = trim((string)($_POST['contact_no'] ?? ''));
+        $barangayId = (int)($_POST['barangay_id'] ?? 0);
+        $address    = trim((string)($_POST['address'] ?? ''));
+        $regDate    = trim((string)($_POST['registration_date'] ?? date('Y-m-d')));
 
-        if ($farmerId <= 0 || $firstName === '' || $lastName === '') {
-            $msg = 'Valid farmer record, first name, and last name are required.';
+        if ($farmerId <= 0) {
+            $msg = 'Valid farmer record is required.';
             $msgType = 'error';
+            $_SESSION['error'] = $msg;
+        } elseif ($firstName === '') {
+            $msg = 'First name is required.';
+            $msgType = 'error';
+            $_SESSION['error'] = $msg;
+        } elseif ($lastName === '') {
+            $msg = 'Last name is required.';
+            $msgType = 'error';
+            $_SESSION['error'] = $msg;
+        } elseif ($barangayId <= 0) {
+            $msg = 'Please select a barangay.';
+            $msgType = 'error';
+            $_SESSION['error'] = $msg;
         } else {
             try {
                 $cur = $pdo->prepare("SELECT * FROM farmers WHERE farmer_id = :id AND is_deleted = FALSE");
@@ -118,33 +199,60 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (!$oldRow) {
                     $msg = 'Farmer record not found or already deleted.';
                     $msgType = 'error';
+                    $_SESSION['error'] = $msg;
                 } else {
                     $pdo->beginTransaction();
-                    $stmt = $pdo->prepare("
-                        UPDATE farmers
-                        SET first_name = :first_name,
-                            last_name = :last_name,
-                            contact_no = :contact_no,
-                            address = :address,
-                            registration_date = :reg_date,
-                            updated_at = NOW(),
-                            updated_by = :updated_by
-                        WHERE farmer_id = :id
-                    ");
-                    $stmt->execute([
-                        ':first_name' => $firstName,
-                        ':last_name'  => $lastName,
-                        ':contact_no' => $contactNo ?: null,
-                        ':address'    => $address ?: null,
-                        ':reg_date'   => $regDate ?: date('Y-m-d'),
-                        ':updated_by' => $currentUserId,
-                        ':id'         => $farmerId,
-                    ]);
+                    if ($hasBarangayCol) {
+                        $stmt = $pdo->prepare("
+                            UPDATE farmers
+                            SET first_name = :first_name,
+                                last_name = :last_name,
+                                contact_no = :contact_no,
+                                address = :address,
+                                barangay_id = :barangay_id,
+                                registration_date = :reg_date,
+                                updated_at = NOW(),
+                                updated_by = :updated_by
+                            WHERE farmer_id = :id
+                        ");
+                        $stmt->execute([
+                            ':first_name'  => $firstName,
+                            ':last_name'   => $lastName,
+                            ':contact_no'  => $contactNo ?: null,
+                            ':address'     => $address ?: null,
+                            ':barangay_id' => $barangayId,
+                            ':reg_date'    => $regDate ?: date('Y-m-d'),
+                            ':updated_by'  => $currentUserId,
+                            ':id'          => $farmerId,
+                        ]);
+                    } else {
+                        $stmt = $pdo->prepare("
+                            UPDATE farmers
+                            SET first_name = :first_name,
+                                last_name = :last_name,
+                                contact_no = :contact_no,
+                                address = :address,
+                                registration_date = :reg_date,
+                                updated_at = NOW(),
+                                updated_by = :updated_by
+                            WHERE farmer_id = :id
+                        ");
+                        $stmt->execute([
+                            ':first_name' => $firstName,
+                            ':last_name'  => $lastName,
+                            ':contact_no' => $contactNo ?: null,
+                            ':address'    => $address ?: null,
+                            ':reg_date'   => $regDate ?: date('Y-m-d'),
+                            ':updated_by' => $currentUserId,
+                            ':id'         => $farmerId,
+                        ]);
+                    }
 
                     $newData = [
                         'first_name'        => $firstName,
                         'last_name'         => $lastName,
                         'contact_no'        => $contactNo,
+                        'barangay_id'       => $barangayId,
                         'address'           => $address,
                         'registration_date' => $regDate,
                     ];
@@ -160,7 +268,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } catch (Throwable $e) {
                 if ($pdo->inTransaction()) $pdo->rollBack();
                 error_log('Farmer update failed: ' . $e->getMessage());
-                $msg = 'Failed to update farmer: ' . $e->getMessage();
+                if (strpos($e->getMessage(), '23502') !== false) {
+                    $msg = 'Please fill out all mandatory fields before saving.';
+                } elseif (strpos($e->getMessage(), '23505') !== false) {
+                    $msg = 'A farmer with these unique details already exists.';
+                } else {
+                    $msg = 'Failed to update farmer: ' . $e->getMessage();
+                }
+                $_SESSION['error'] = $msg;
                 $msgType = 'error';
             }
         }
@@ -282,7 +397,7 @@ $farmers = $stmt->fetchAll(PDO::FETCH_ASSOC);
 </div>
 
 <?php if ($msg !== ''): ?>
-<div class="card" style="border-left:4px solid <?= $msgType === 'success' ? 'var(--success)' : 'var(--danger)' ?>; padding:0.9rem 1.25rem;">
+<div class="card alert alert-<?= $msgType === 'success' ? 'success' : 'danger' ?>" style="border-left:4px solid <?= $msgType === 'success' ? 'var(--success)' : 'var(--danger)' ?>; padding:0.9rem 1.25rem;">
   <strong style="color:<?= $msgType === 'success' ? 'var(--success)' : 'var(--danger)' ?>;">
     <?= $msgType === 'success' ? '✓ ' : '⚠ ' ?><?= e($msg) ?>
   </strong>
@@ -378,7 +493,7 @@ $farmers = $stmt->fetchAll(PDO::FETCH_ASSOC);
           <td style="text-align:right;">
             <div style="display:inline-flex; align-items:center; gap:0.35rem;">
               <button type="button" class="btn btn-secondary btn-sm"
-                      onclick='openEditFarmerModal(<?= (int)$f['farmer_id'] ?>, <?= json_encode($f['first_name']) ?>, <?= json_encode($f['last_name']) ?>, <?= json_encode($f['contact_no']) ?>, <?= json_encode($f['address']) ?>, <?= json_encode($f['registration_date']) ?>)'>
+                      onclick='openEditFarmerModal(<?= (int)$f['farmer_id'] ?>, <?= json_encode($f['first_name']) ?>, <?= json_encode($f['last_name']) ?>, <?= json_encode($f['contact_no']) ?>, <?= json_encode($f['address']) ?>, <?= json_encode($f['registration_date']) ?>, <?= (int)($f['barangay_id'] ?? 0) ?>)'>
                 Edit
               </button>
 
@@ -435,7 +550,7 @@ $farmers = $stmt->fetchAll(PDO::FETCH_ASSOC);
       <h3 class="sp-modal-title">Register New Farmer</h3>
       <button type="button" class="sp-modal-close" onclick="closeModal('modal-create-farmer')">&times;</button>
     </div>
-    <form method="POST" action="farmers.php" data-pjax autocomplete="off">
+    <form method="POST" action="farmers.php" data-pjax autocomplete="off" novalidate class="needs-validation">
       <input type="hidden" name="action" value="create">
 
       <div class="sp-modal-body">
@@ -443,10 +558,12 @@ $farmers = $stmt->fetchAll(PDO::FETCH_ASSOC);
           <div class="form-group">
             <label class="form-label" for="add_first_name">First Name <span style="color:var(--danger)">*</span></label>
             <input type="text" id="add_first_name" name="first_name" class="form-control" required maxlength="100">
+            <div class="invalid-feedback">First name is required.</div>
           </div>
           <div class="form-group">
             <label class="form-label" for="add_last_name">Last Name <span style="color:var(--danger)">*</span></label>
             <input type="text" id="add_last_name" name="last_name" class="form-control" required maxlength="100">
+            <div class="invalid-feedback">Last name is required.</div>
           </div>
         </div>
 
@@ -456,8 +573,19 @@ $farmers = $stmt->fetchAll(PDO::FETCH_ASSOC);
         </div>
 
         <div class="form-group">
+          <label class="form-label" for="add_barangay_id">Barangay <span style="color:var(--danger)">*</span></label>
+          <select id="add_barangay_id" name="barangay_id" class="form-control" required>
+            <option value="">-- Select Barangay --</option>
+            <?php foreach ($activeBarangays as $b): ?>
+            <option value="<?= (int)$b['barangay_id'] ?>"><?= e($b['barangay_name']) ?></option>
+            <?php endforeach; ?>
+          </select>
+          <div class="invalid-feedback">Please select a barangay.</div>
+        </div>
+
+        <div class="form-group">
           <label class="form-label" for="add_address">Complete Address</label>
-          <textarea id="add_address" name="address" class="form-control" rows="2" placeholder="Barangay, Municipality, Province"></textarea>
+          <textarea id="add_address" name="address" class="form-control" rows="2" placeholder="Street, Sitio, Landmark"></textarea>
         </div>
 
         <div class="form-group">
@@ -481,7 +609,7 @@ $farmers = $stmt->fetchAll(PDO::FETCH_ASSOC);
       <h3 class="sp-modal-title">Edit Farmer Information</h3>
       <button type="button" class="sp-modal-close" onclick="closeModal('modal-edit-farmer')">&times;</button>
     </div>
-    <form method="POST" action="farmers.php" data-pjax autocomplete="off">
+    <form method="POST" action="farmers.php" data-pjax autocomplete="off" novalidate class="needs-validation">
       <input type="hidden" name="action" value="update">
       <input type="hidden" id="edit_farmer_id" name="farmer_id" value="">
 
@@ -490,16 +618,29 @@ $farmers = $stmt->fetchAll(PDO::FETCH_ASSOC);
           <div class="form-group">
             <label class="form-label" for="edit_first_name">First Name <span style="color:var(--danger)">*</span></label>
             <input type="text" id="edit_first_name" name="first_name" class="form-control" required maxlength="100">
+            <div class="invalid-feedback">First name is required.</div>
           </div>
           <div class="form-group">
             <label class="form-label" for="edit_last_name">Last Name <span style="color:var(--danger)">*</span></label>
             <input type="text" id="edit_last_name" name="last_name" class="form-control" required maxlength="100">
+            <div class="invalid-feedback">Last name is required.</div>
           </div>
         </div>
 
         <div class="form-group">
           <label class="form-label" for="edit_contact">Contact Number</label>
           <input type="text" id="edit_contact" name="contact_no" class="form-control" maxlength="30">
+        </div>
+
+        <div class="form-group">
+          <label class="form-label" for="edit_barangay_id">Barangay <span style="color:var(--danger)">*</span></label>
+          <select id="edit_barangay_id" name="barangay_id" class="form-control" required>
+            <option value="">-- Select Barangay --</option>
+            <?php foreach ($activeBarangays as $b): ?>
+            <option value="<?= (int)$b['barangay_id'] ?>"><?= e($b['barangay_name']) ?></option>
+            <?php endforeach; ?>
+          </select>
+          <div class="invalid-feedback">Please select a barangay.</div>
         </div>
 
         <div class="form-group">
@@ -521,6 +662,14 @@ $farmers = $stmt->fetchAll(PDO::FETCH_ASSOC);
   </div>
 </div>
 
+<style>
+.needs-validation .form-control:invalid { border-color: #DC2626; }
+.needs-validation .form-control:valid { border-color: #16A34A; }
+.invalid-feedback { display: none; color: #DC2626; font-size: 0.78rem; margin-top: 0.25rem; }
+.was-validated .form-control:invalid ~ .invalid-feedback { display: block; }
+.was-validated .form-control:invalid { border-color: #DC2626; }
+</style>
+
 <script>
   function openCreateFarmerModal() {
     if (typeof openModal === 'function') {
@@ -529,13 +678,18 @@ $farmers = $stmt->fetchAll(PDO::FETCH_ASSOC);
       document.getElementById('modal-create-farmer').classList.add('open');
     }
   }
-  function openEditFarmerModal(id, first, last, contact, addr, regDate) {
+  function openEditFarmerModal(id, first, last, contact, addr, regDate, barangayId) {
     document.getElementById('edit_farmer_id').value = id;
     document.getElementById('edit_first_name').value = first || '';
     document.getElementById('edit_last_name').value = last || '';
     document.getElementById('edit_contact').value = contact || '';
     document.getElementById('edit_address').value = addr || '';
     document.getElementById('edit_reg_date').value = regDate || '';
+    const bSel = document.getElementById('edit_barangay_id');
+    if (bSel) {
+      bSel.value = barangayId || '';
+      bSel.dispatchEvent(new Event('change', { bubbles: true }));
+    }
     if (typeof openModal === 'function') {
       openModal('modal-edit-farmer');
     } else {
@@ -546,6 +700,17 @@ $farmers = $stmt->fetchAll(PDO::FETCH_ASSOC);
     const el = document.getElementById(id);
     if (el) el.classList.remove('open');
   }
+
+  // Form validation for needs-validation forms
+  document.addEventListener('submit', function(e) {
+    var form = e.target;
+    if (!form.classList.contains('needs-validation')) return;
+    if (!form.checkValidity()) {
+      e.preventDefault();
+      e.stopPropagation();
+      form.classList.add('was-validated');
+    }
+  }, true);
 </script>
 
 <?php require_once __DIR__ . '/includes/footer.php'; ?>

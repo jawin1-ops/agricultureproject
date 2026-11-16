@@ -185,11 +185,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
       <h2 class="card-title">Update Information</h2>
     </div>
 
-    <form method="POST" action="profile.php" data-pjax autocomplete="off">
+    <form method="POST" action="profile.php" data-pjax autocomplete="off" novalidate class="needs-validation">
       <div class="form-group">
         <label class="form-label" for="full_name">Full Display Name <span style="color:var(--danger)">*</span></label>
         <input type="text" id="full_name" name="full_name" class="form-control"
                value="<?= e($currentUserData['full_name']) ?>" required maxlength="150">
+        <div class="invalid-feedback">Full display name is required.</div>
         <span class="form-hint">Shown across the system on record audit trails and navigation bars.</span>
       </div>
 
@@ -203,6 +204,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <label class="form-label" for="new_password">New Password</label>
         <input type="password" id="new_password" name="new_password" class="form-control"
                placeholder="Leave blank to keep current password" minlength="8" autocomplete="new-password">
+        <div class="invalid-feedback">New password must be at least 8 characters long.</div>
         <span class="form-hint">Minimum 8 characters. Leave empty if not changing.</span>
       </div>
 
@@ -210,6 +212,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <label class="form-label" for="confirm_password">Confirm New Password</label>
         <input type="password" id="confirm_password" name="confirm_password" class="form-control"
                placeholder="Re-type new password" minlength="8" autocomplete="new-password">
+        <div class="invalid-feedback">Please confirm your new password.</div>
       </div>
 
       <hr style="border:none; border-top:1px solid var(--border-light); margin:1.25rem 0;">
@@ -218,6 +221,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         <label class="form-label" for="current_password">Current Password <span style="color:var(--danger)">*</span></label>
         <input type="password" id="current_password" name="current_password" class="form-control"
                placeholder="Enter your current password to authorize changes" required autocomplete="current-password">
+        <div class="invalid-feedback">Current password is required to save any profile changes.</div>
         <span class="form-hint">Required for security verification before saving profile changes.</span>
       </div>
 
@@ -228,5 +232,48 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
   </div>
 
 </div>
+
+<style>
+.needs-validation .form-control:invalid { border-color: #DC2626; }
+.invalid-feedback { display: none; color: #DC2626; font-size: 0.78rem; margin-top: 0.25rem; }
+.was-validated .form-control:invalid ~ .invalid-feedback { display: block; }
+.was-validated .form-control:invalid { border-color: #DC2626; }
+</style>
+
+<script>
+  // Password match custom validity
+  (function () {
+    const newPw  = document.getElementById('new_password');
+    const conPw  = document.getElementById('confirm_password');
+    function checkMatch() {
+      if (newPw.value && conPw.value && newPw.value !== conPw.value) {
+        conPw.setCustomValidity('Passwords do not match.');
+      } else {
+        conPw.setCustomValidity('');
+      }
+    }
+    if (newPw && conPw) {
+      newPw.addEventListener('input', checkMatch);
+      conPw.addEventListener('input', checkMatch);
+    }
+  })();
+
+  // Bootstrap 5-style needs-validation handler
+  document.addEventListener('submit', function(e) {
+    var form = e.target;
+    if (!form.classList.contains('needs-validation')) return;
+    // Re-check password match before submit
+    var newPw = document.getElementById('new_password');
+    var conPw = document.getElementById('confirm_password');
+    if (newPw && conPw && newPw.value && newPw.value !== conPw.value) {
+      conPw.setCustomValidity('Passwords do not match.');
+    }
+    if (!form.checkValidity()) {
+      e.preventDefault();
+      e.stopPropagation();
+      form.classList.add('was-validated');
+    }
+  }, true);
+</script>
 
 <?php require_once __DIR__ . '/includes/footer.php'; ?>

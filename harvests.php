@@ -19,7 +19,11 @@ $currentUserId = (int)currentUserId();
 $msg = '';
 $msgType = 'info';
 
-if (isset($_GET['updated'])) {
+if (isset($_SESSION['error'])) {
+    $msg = $_SESSION['error'];
+    $msgType = 'error';
+    unset($_SESSION['error']);
+} elseif (isset($_GET['updated'])) {
     $msg = $_SESSION['flash_msg'] ?? 'Harvest updated successfully.';
     $msgType = $_SESSION['flash_type'] ?? 'success';
     unset($_SESSION['flash_msg'], $_SESSION['flash_type']);
@@ -50,12 +54,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $gradeId      = (int)($_POST['grade_id'] ?? 0) ?: null;
         $remarkId     = (int)($_POST['remark_id'] ?? 0) ?: null;
 
-        if ($plantingId <= 0 || $harvestDate === '') {
-            $msg = 'Planting record and harvest date are required.';
+        if ($plantingId <= 0) {
+            $msg = 'Please select a planting cycle.';
             $msgType = 'error';
-        } elseif ($quantityKg <= 0) {
-            $msg = 'Harvest quantity (kg) must be greater than zero.';
+            $_SESSION['error'] = $msg;
+        } elseif ($harvestDate === '') {
+            $msg = 'Harvest date is required.';
             $msgType = 'error';
+            $_SESSION['error'] = $msg;
+        } elseif ($quantityKg < 0.01) {
+            $msg = 'Harvest quantity must be at least 0.01 kg.';
+            $msgType = 'error';
+            $_SESSION['error'] = $msg;
+        } elseif ((int)($_POST['grade_id'] ?? 0) <= 0) {
+            $msg = 'Please select a quality grade.';
+            $msgType = 'error';
+            $_SESSION['error'] = $msg;
+        } elseif ((int)($_POST['remark_id'] ?? 0) <= 0) {
+            $msg = 'Please select a harvest remark.';
+            $msgType = 'error';
+            $_SESSION['error'] = $msg;
         } else {
             try {
                 $pdo->beginTransaction();
@@ -116,7 +134,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } catch (Throwable $e) {
                 if ($pdo->inTransaction()) $pdo->rollBack();
                 error_log('Harvest creation failed: ' . $e->getMessage());
-                $msg = 'Failed to record harvest: ' . $e->getMessage();
+                if (strpos($e->getMessage(), '23502') !== false) {
+                    $msg = 'Please fill out all mandatory harvest fields.';
+                } else {
+                    $msg = 'Failed to record harvest: ' . $e->getMessage();
+                }
+                $_SESSION['error'] = $msg;
                 $msgType = 'error';
             }
         }
@@ -132,9 +155,26 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $gradeId      = (int)($_POST['grade_id'] ?? 0) ?: null;
         $remarkId     = (int)($_POST['remark_id'] ?? 0) ?: null;
 
-        if ($harvestId <= 0 || $plantingId <= 0 || $harvestDate === '' || $quantityKg <= 0) {
-            $msg = 'Valid harvest ID, planting, date, and positive quantity are required.';
+        if ($harvestId <= 0 || $plantingId <= 0) {
+            $msg = 'Valid harvest and planting records are required.';
             $msgType = 'error';
+            $_SESSION['error'] = $msg;
+        } elseif ($harvestDate === '') {
+            $msg = 'Harvest date is required.';
+            $msgType = 'error';
+            $_SESSION['error'] = $msg;
+        } elseif ($quantityKg < 0.01) {
+            $msg = 'Harvest quantity must be at least 0.01 kg.';
+            $msgType = 'error';
+            $_SESSION['error'] = $msg;
+        } elseif ((int)($_POST['grade_id'] ?? 0) <= 0) {
+            $msg = 'Please select a quality grade.';
+            $msgType = 'error';
+            $_SESSION['error'] = $msg;
+        } elseif ((int)($_POST['remark_id'] ?? 0) <= 0) {
+            $msg = 'Please select a harvest remark.';
+            $msgType = 'error';
+            $_SESSION['error'] = $msg;
         } else {
             try {
                 $cur = $pdo->prepare("SELECT * FROM harvests WHERE harvest_id = :id AND is_deleted = FALSE");
@@ -144,6 +184,7 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 if (!$oldRow) {
                     $msg = 'Harvest not found or already deleted.';
                     $msgType = 'error';
+                    $_SESSION['error'] = $msg;
                 } else {
                     $pdo->beginTransaction();
                     $stmt = $pdo->prepare("
@@ -202,7 +243,12 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } catch (Throwable $e) {
                 if ($pdo->inTransaction()) $pdo->rollBack();
                 error_log('Harvest update failed: ' . $e->getMessage());
-                $msg = 'Failed to update harvest: ' . $e->getMessage();
+                if (strpos($e->getMessage(), '23502') !== false) {
+                    $msg = 'Please fill out all mandatory harvest fields.';
+                } else {
+                    $msg = 'Failed to update harvest: ' . $e->getMessage();
+                }
+                $_SESSION['error'] = $msg;
                 $msgType = 'error';
             }
         }
@@ -350,7 +396,7 @@ $harvests = $stmt->fetchAll(PDO::FETCH_ASSOC);
 </div>
 
 <?php if ($msg !== ''): ?>
-<div class="card" style="border-left:4px solid <?= $msgType === 'success' ? 'var(--success)' : 'var(--danger)' ?>; padding:0.9rem 1.25rem;">
+<div class="card alert alert-<?= $msgType === 'success' ? 'success' : 'danger' ?>" style="border-left:4px solid <?= $msgType === 'success' ? 'var(--success)' : 'var(--danger)' ?>; padding:0.9rem 1.25rem;">
   <strong style="color:<?= $msgType === 'success' ? 'var(--success)' : 'var(--danger)' ?>;">
     <?= $msgType === 'success' ? '✓ ' : '⚠ ' ?><?= e($msg) ?>
   </strong>
@@ -529,7 +575,7 @@ $harvests = $stmt->fetchAll(PDO::FETCH_ASSOC);
       <h3 class="sp-modal-title">Record Crop Harvest</h3>
       <button type="button" class="sp-modal-close" onclick="closeModal('modal-create-harvest')">&times;</button>
     </div>
-    <form method="POST" action="harvests.php" data-pjax autocomplete="off">
+    <form method="POST" action="harvests.php" data-pjax autocomplete="off" novalidate class="needs-validation">
       <input type="hidden" name="action" value="create">
 
       <div class="sp-modal-body">
@@ -543,18 +589,21 @@ $harvests = $stmt->fetchAll(PDO::FETCH_ASSOC);
             </option>
             <?php endforeach; ?>
           </select>
+          <div class="invalid-feedback">Please select a planting cycle.</div>
           <span class="form-hint">Recording a harvest will automatically advance planting status to 'Harvested'.</span>
         </div>
 
         <div class="form-group">
           <label class="form-label" for="add_h_date">Harvest Date <span style="color:var(--danger)">*</span></label>
           <input type="date" id="add_h_date" name="harvest_date" class="form-control" value="<?= date('Y-m-d') ?>" required>
+          <div class="invalid-feedback">Harvest date is required.</div>
         </div>
 
         <div class="form-grid">
           <div class="form-group">
             <label class="form-label" for="add_h_qty">Quantity Harvested (kg) <span style="color:var(--danger)">*</span></label>
             <input type="number" id="add_h_qty" name="quantity_kg" class="form-control" step="0.01" min="0.01" placeholder="e.g. 1500.00" required oninput="calcAddTotal()">
+            <div class="invalid-feedback">Quantity must be at least 0.01 kg.</div>
           </div>
           <div class="form-group">
             <label class="form-label" for="add_h_price">Selling Price per kg (₱)</label>
@@ -570,22 +619,24 @@ $harvests = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
         <div class="form-grid">
           <div class="form-group">
-            <label class="form-label" for="add_h_grade">Quality Grade</label>
-            <select id="add_h_grade" name="grade_id" class="form-control">
+            <label class="form-label" for="add_h_grade">Quality Grade <span style="color:var(--danger)">*</span></label>
+            <select id="add_h_grade" name="grade_id" class="form-control" required>
               <option value="">-- Select Grade --</option>
               <?php foreach ($activeGrades as $g): ?>
               <option value="<?= (int)$g['grade_id'] ?>"><?= e($g['description']) ?></option>
               <?php endforeach; ?>
             </select>
+            <div class="invalid-feedback">Please select a quality grade.</div>
           </div>
           <div class="form-group">
-            <label class="form-label" for="add_h_remark">Harvest Remark</label>
-            <select id="add_h_remark" name="remark_id" class="form-control">
+            <label class="form-label" for="add_h_remark">Harvest Remark <span style="color:var(--danger)">*</span></label>
+            <select id="add_h_remark" name="remark_id" class="form-control" required>
               <option value="">-- Select Remark --</option>
               <?php foreach ($activeRemarks as $rm): ?>
               <option value="<?= (int)$rm['remark_id'] ?>"><?= e($rm['description']) ?></option>
               <?php endforeach; ?>
             </select>
+            <div class="invalid-feedback">Please select a harvest remark.</div>
           </div>
         </div>
       </div>
@@ -605,7 +656,7 @@ $harvests = $stmt->fetchAll(PDO::FETCH_ASSOC);
       <h3 class="sp-modal-title">Edit Harvest Record</h3>
       <button type="button" class="sp-modal-close" onclick="closeModal('modal-edit-harvest')">&times;</button>
     </div>
-    <form method="POST" action="harvests.php" data-pjax autocomplete="off">
+    <form method="POST" action="harvests.php" data-pjax autocomplete="off" novalidate class="needs-validation">
       <input type="hidden" name="action" value="update">
       <input type="hidden" id="edit_harvest_id" name="harvest_id" value="">
 
@@ -613,23 +664,27 @@ $harvests = $stmt->fetchAll(PDO::FETCH_ASSOC);
         <div class="form-group">
           <label class="form-label" for="edit_h_planting_id">Planting Cycle <span style="color:var(--danger)">*</span></label>
           <select id="edit_h_planting_id" name="planting_id" class="form-control" required>
+            <option value="">-- Select Planting --</option>
             <?php foreach ($plantingsList as $pl): ?>
             <option value="<?= (int)$pl['planting_id'] ?>">
               #<?= (int)$pl['planting_id'] ?> · <?= e($pl['crop_name']) ?> @ <?= e($pl['farm_name']) ?>
             </option>
             <?php endforeach; ?>
           </select>
+          <div class="invalid-feedback">Please select a planting cycle.</div>
         </div>
 
         <div class="form-group">
           <label class="form-label" for="edit_h_date">Harvest Date <span style="color:var(--danger)">*</span></label>
           <input type="date" id="edit_h_date" name="harvest_date" class="form-control" required>
+          <div class="invalid-feedback">Harvest date is required.</div>
         </div>
 
         <div class="form-grid">
           <div class="form-group">
             <label class="form-label" for="edit_h_qty">Quantity Harvested (kg) <span style="color:var(--danger)">*</span></label>
             <input type="number" id="edit_h_qty" name="quantity_kg" class="form-control" step="0.01" min="0.01" required oninput="calcEditTotal()">
+            <div class="invalid-feedback">Quantity must be at least 0.01 kg.</div>
           </div>
           <div class="form-group">
             <label class="form-label" for="edit_h_price">Selling Price per kg (₱)</label>
@@ -644,22 +699,24 @@ $harvests = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
         <div class="form-grid">
           <div class="form-group">
-            <label class="form-label" for="edit_h_grade">Quality Grade</label>
-            <select id="edit_h_grade" name="grade_id" class="form-control">
+            <label class="form-label" for="edit_h_grade">Quality Grade <span style="color:var(--danger)">*</span></label>
+            <select id="edit_h_grade" name="grade_id" class="form-control" required>
               <option value="">-- Select Grade --</option>
               <?php foreach ($activeGrades as $g): ?>
               <option value="<?= (int)$g['grade_id'] ?>"><?= e($g['description']) ?></option>
               <?php endforeach; ?>
             </select>
+            <div class="invalid-feedback">Please select a quality grade.</div>
           </div>
           <div class="form-group">
-            <label class="form-label" for="edit_h_remark">Harvest Remark</label>
-            <select id="edit_h_remark" name="remark_id" class="form-control">
+            <label class="form-label" for="edit_h_remark">Harvest Remark <span style="color:var(--danger)">*</span></label>
+            <select id="edit_h_remark" name="remark_id" class="form-control" required>
               <option value="">-- Select Remark --</option>
               <?php foreach ($activeRemarks as $rm): ?>
               <option value="<?= (int)$rm['remark_id'] ?>"><?= e($rm['description']) ?></option>
               <?php endforeach; ?>
             </select>
+            <div class="invalid-feedback">Please select a harvest remark.</div>
           </div>
         </div>
       </div>
@@ -694,12 +751,24 @@ $harvests = $stmt->fetchAll(PDO::FETCH_ASSOC);
   }
   function openEditHarvestModal(id, plantingId, date, qty, price, gradeId, remarkId) {
     document.getElementById('edit_harvest_id').value = id;
-    document.getElementById('edit_h_planting_id').value = plantingId;
+    const pSel = document.getElementById('edit_h_planting_id');
+    if (pSel) {
+      pSel.value = plantingId;
+      pSel.dispatchEvent(new Event('change', { bubbles: true }));
+    }
     document.getElementById('edit_h_date').value = date;
     document.getElementById('edit_h_qty').value = qty;
     document.getElementById('edit_h_price').value = price || '';
-    document.getElementById('edit_h_grade').value = gradeId || '';
-    document.getElementById('edit_h_remark').value = remarkId || '';
+    const gSel = document.getElementById('edit_h_grade');
+    if (gSel) {
+      gSel.value = gradeId || '';
+      gSel.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+    const rSel = document.getElementById('edit_h_remark');
+    if (rSel) {
+      rSel.value = remarkId || '';
+      rSel.dispatchEvent(new Event('change', { bubbles: true }));
+    }
     calcEditTotal();
     if (typeof openModal === 'function') {
       openModal('modal-edit-harvest');
@@ -711,6 +780,17 @@ $harvests = $stmt->fetchAll(PDO::FETCH_ASSOC);
     const el = document.getElementById(id);
     if (el) el.classList.remove('open');
   }
+
+  // Form validation for needs-validation forms
+  document.addEventListener('submit', function(e) {
+    var form = e.target;
+    if (!form.classList.contains('needs-validation')) return;
+    if (!form.checkValidity()) {
+      e.preventDefault();
+      e.stopPropagation();
+      form.classList.add('was-validated');
+    }
+  }, true);
 </script>
 
 <?php require_once __DIR__ . '/includes/footer.php'; ?>

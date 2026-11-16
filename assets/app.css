@@ -1026,6 +1026,64 @@ body {
   }
 }
 
+/* ─── Form Validation Styles (Bootstrap 5 Compatible) ──────────────── */
+.invalid-feedback {
+  display: none;
+  width: 100%;
+  margin-top: 0.3rem;
+  font-size: 0.82rem;
+  color: var(--danger, #DC2626);
+  font-weight: 500;
+}
+
+.was-validated .form-control:invalid ~ .invalid-feedback,
+.was-validated .form-control:invalid ~ * .invalid-feedback,
+.form-control.is-invalid ~ .invalid-feedback,
+.custom-select-container.is-invalid ~ .invalid-feedback {
+  display: block;
+}
+
+.was-validated .form-control:invalid,
+.form-control.is-invalid {
+  border-color: var(--danger, #DC2626) !important;
+  background-color: #FFF5F5 !important;
+}
+
+.was-validated select.form-control:invalid,
+select.form-control.is-invalid {
+  border-color: var(--danger, #DC2626) !important;
+  background-color: #FFF5F5 !important;
+}
+
+.was-validated select:invalid + .custom-select-container .custom-select-trigger,
+select.is-invalid + .custom-select-container .custom-select-trigger {
+  border-color: var(--danger, #DC2626) !important;
+  background-color: #FFF5F5 !important;
+}
+
+.was-validated select:invalid + .custom-select-container + .invalid-feedback,
+select.is-invalid + .custom-select-container + .invalid-feedback {
+  display: block !important;
+}
+
+.was-validated .form-control:invalid:focus,
+.form-control.is-invalid:focus {
+  border-color: var(--danger, #DC2626) !important;
+  box-shadow: 0 0 0 3px rgba(220, 38, 38, 0.2) !important;
+}
+
+.alert-danger {
+  background-color: var(--danger-pale, #FEE2E2);
+  color: var(--danger, #DC2626);
+  border: 1px solid var(--danger-border, #FECACA);
+}
+
+.alert-success {
+  background-color: var(--success-pale, #DCFCE7);
+  color: var(--success, #15803D);
+  border: 1px solid var(--success-border, #BBF7D0);
+}
+
 /* ─── Print Stylesheet ───────────────────────────────────────────────── */
 @media print {
   body {

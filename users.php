@@ -34,6 +34,14 @@ if (isset($_GET['updated'])) {
     $msg = $_SESSION['flash_msg'] ?? 'User reactivated successfully.';
     $msgType = $_SESSION['flash_type'] ?? 'success';
     unset($_SESSION['flash_msg'], $_SESSION['flash_type']);
+} elseif (!empty($_SESSION['error'])) {
+    $msg = $_SESSION['error'];
+    $msgType = 'danger';
+    unset($_SESSION['error']);
+} elseif (!empty($_SESSION['success'])) {
+    $msg = $_SESSION['success'];
+    $msgType = 'success';
+    unset($_SESSION['success']);
 } elseif (isset($_SESSION['flash_msg'])) {
     $msg = $_SESSION['flash_msg'];
     $msgType = $_SESSION['flash_type'] ?? 'info';
@@ -49,25 +57,29 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $username = trim((string)($_POST['username'] ?? ''));
         $fullName = trim((string)($_POST['full_name'] ?? ''));
         $password = (string)($_POST['password'] ?? '');
-        $roleId   = (int)($_POST['role_id'] ?? ROLE_STAFF);
+        $roleId   = (int)($_POST['role_id'] ?? 0);
 
         if ($username === '' || $fullName === '' || $password === '') {
-            $msg = 'Username, full name, and password are all required.';
-            $msgType = 'error';
+            $_SESSION['error'] = 'Username, full name, and password are all required.';
+            header('Location: users.php');
+            exit;
         } elseif (strlen($password) < 8) {
-            $msg = 'Password must be at least 8 characters long.';
-            $msgType = 'error';
+            $_SESSION['error'] = 'Password must be at least 8 characters long.';
+            header('Location: users.php');
+            exit;
         } elseif (!in_array($roleId, [ROLE_ADMIN, ROLE_STAFF], true)) {
-            $msg = 'Invalid role selected.';
-            $msgType = 'error';
+            $_SESSION['error'] = 'Please select a valid role (Staff or Administrator).';
+            header('Location: users.php');
+            exit;
         } else {
             try {
                 // Check username uniqueness
                 $check = $pdo->prepare("SELECT user_id FROM \"system_user\" WHERE LOWER(username) = LOWER(:u) LIMIT 1");
                 $check->execute([':u' => $username]);
                 if ($check->fetch()) {
-                    $msg = "A user with the username '{$username}' already exists.";
-                    $msgType = 'error';
+                    $_SESSION['error'] = "A user with the username '{$username}' already exists. Please choose another username.";
+                    header('Location: users.php');
+                    exit;
                 } else {
                     $pdo->beginTransaction();
                     $hash = hashPassword($password);
@@ -107,8 +119,13 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } catch (Throwable $e) {
                 if ($pdo->inTransaction()) $pdo->rollBack();
                 error_log('Failed to create user: ' . $e->getMessage());
-                $msg = 'Failed to create user: ' . $e->getMessage();
-                $msgType = 'error';
+                if (strpos($e->getMessage(), '23505') !== false) {
+                    $_SESSION['error'] = "A user with the username '{$username}' already exists.";
+                } else {
+                    $_SESSION['error'] = 'Failed to create user: ' . $e->getMessage();
+                }
+                header('Location: users.php');
+                exit;
             }
         }
     }
@@ -120,8 +137,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $roleId       = (int)($_POST['role_id'] ?? 0);
 
         if ($targetUserId <= 0 || $fullName === '' || !in_array($roleId, [ROLE_ADMIN, ROLE_STAFF], true)) {
-            $msg = 'Valid user, name, and role are required.';
-            $msgType = 'error';
+            $_SESSION['error'] = 'Full name and a valid role are required.';
+            header('Location: users.php');
+            exit;
         } else {
             try {
                 $cur = $pdo->prepare("SELECT user_id, username, full_name, role_id FROM \"system_user\" WHERE user_id = :id");
@@ -129,47 +147,48 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $oldRow = $cur->fetch(PDO::FETCH_ASSOC);
 
                 if (!$oldRow) {
-                    $msg = 'User not found.';
-                    $msgType = 'error';
+                    $_SESSION['error'] = 'User not found.';
+                    header('Location: users.php');
+                    exit;
                 } else {
                     // Check if demoting the last admin
                     if ((int)$oldRow['role_id'] === ROLE_ADMIN && $roleId !== ROLE_ADMIN) {
                         $adminCheck = $pdo->prepare("SELECT COUNT(*) FROM \"system_user\" WHERE role_id = :r AND is_deleted = FALSE AND user_id <> :id");
                         $adminCheck->execute([':r' => ROLE_ADMIN, ':id' => $targetUserId]);
                         if ((int)$adminCheck->fetchColumn() === 0) {
-                            $msg = 'Cannot demote the last remaining active Administrator. Promote another administrator first.';
-                            $msgType = 'error';
+                            $_SESSION['error'] = 'Cannot demote the last remaining active Administrator. Promote another administrator first.';
+                            header('Location: users.php');
+                            exit;
                         }
                     }
 
-                    if ($msgType !== 'error') {
-                        $pdo->beginTransaction();
-                        $upd = $pdo->prepare("UPDATE \"system_user\" SET full_name = :name, role_id = :role, updated_at = NOW() WHERE user_id = :id");
-                        $upd->execute([':name' => $fullName, ':role' => $roleId, ':id' => $targetUserId]);
+                    $pdo->beginTransaction();
+                    $upd = $pdo->prepare("UPDATE \"system_user\" SET full_name = :name, role_id = :role, updated_at = NOW() WHERE user_id = :id");
+                    $upd->execute([':name' => $fullName, ':role' => $roleId, ':id' => $targetUserId]);
 
-                        logActivity(
-                            $pdo,
-                            'UPDATE',
-                            'system_user',
-                            $targetUserId,
-                            "Updated profile/role for user '{$oldRow['username']}'",
-                            $oldRow,
-                            ['full_name' => $fullName, 'role_id' => $roleId]
-                        );
+                    logActivity(
+                        $pdo,
+                        'UPDATE',
+                        'system_user',
+                        $targetUserId,
+                        "Updated profile/role for user '{$oldRow['username']}'",
+                        $oldRow,
+                        ['full_name' => $fullName, 'role_id' => $roleId]
+                    );
 
-                        $pdo->commit();
+                    $pdo->commit();
 
-                        $_SESSION['flash_msg'] = "User '{$oldRow['username']}' updated successfully.";
-                        $_SESSION['flash_type'] = 'success';
-                        header('Location: users.php?updated=1');
-                        exit;
-                    }
+                    $_SESSION['flash_msg'] = "User '{$oldRow['username']}' updated successfully.";
+                    $_SESSION['flash_type'] = 'success';
+                    header('Location: users.php?updated=1');
+                    exit;
                 }
             } catch (Throwable $e) {
                 if ($pdo->inTransaction()) $pdo->rollBack();
                 error_log('Failed to update user: ' . $e->getMessage());
-                $msg = 'Failed to update user: ' . $e->getMessage();
-                $msgType = 'error';
+                $_SESSION['error'] = 'Failed to update user: ' . $e->getMessage();
+                header('Location: users.php');
+                exit;
             }
         }
     }
@@ -179,9 +198,14 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $targetUserId = (int)($_POST['user_id'] ?? 0);
         $newPassword  = (string)($_POST['new_password'] ?? '');
 
-        if ($targetUserId <= 0 || strlen($newPassword) < 8) {
-            $msg = 'Password must be at least 8 characters long.';
-            $msgType = 'error';
+        if ($targetUserId <= 0) {
+            $_SESSION['error'] = 'Invalid user selected.';
+            header('Location: users.php');
+            exit;
+        } elseif (strlen($newPassword) < 8) {
+            $_SESSION['error'] = 'Password must be at least 8 characters long.';
+            header('Location: users.php');
+            exit;
         } else {
             try {
                 $cur = $pdo->prepare("SELECT username FROM \"system_user\" WHERE user_id = :id");
@@ -189,8 +213,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
                 $username = (string)$cur->fetchColumn();
 
                 if ($username === '') {
-                    $msg = 'User not found.';
-                    $msgType = 'error';
+                    $_SESSION['error'] = 'User not found.';
+                    header('Location: users.php');
+                    exit;
                 } else {
                     $pdo->beginTransaction();
                     $hash = hashPassword($newPassword);
@@ -216,8 +241,9 @@ if ($_SERVER['REQUEST_METHOD'] === 'POST') {
             } catch (Throwable $e) {
                 if ($pdo->inTransaction()) $pdo->rollBack();
                 error_log('Failed to reset password: ' . $e->getMessage());
-                $msg = 'Failed to reset password: ' . $e->getMessage();
-                $msgType = 'error';
+                $_SESSION['error'] = 'Failed to reset password: ' . $e->getMessage();
+                header('Location: users.php');
+                exit;
             }
         }
     }
@@ -321,9 +347,9 @@ $users = $stmt->fetchAll(PDO::FETCH_ASSOC);
 </div>
 
 <?php if ($msg !== ''): ?>
-<div class="card" style="border-left:4px solid <?= $msgType === 'success' ? 'var(--success)' : 'var(--danger)' ?>; padding:0.9rem 1.25rem;">
-  <strong style="color:<?= $msgType === 'success' ? 'var(--success)' : 'var(--danger)' ?>;">
-    <?= $msgType === 'success' ? '✓ ' : '⚠ ' ?><?= e($msg) ?>
+<div class="card alert alert-<?= ($msgType === 'success' || $msgType === 'ok') ? 'success' : 'danger' ?>" style="border-left:4px solid <?= ($msgType === 'success' || $msgType === 'ok') ? 'var(--success)' : 'var(--danger)' ?>; padding:0.9rem 1.25rem; margin-bottom:1.5rem;">
+  <strong style="color:<?= ($msgType === 'success' || $msgType === 'ok') ? 'var(--success)' : 'var(--danger)' ?>;">
+    <?= ($msgType === 'success' || $msgType === 'ok') ? '✓ ' : '⚠ ' ?><?= e($msg) ?>
   </strong>
 </div>
 <?php endif; ?>
@@ -441,31 +467,36 @@ $users = $stmt->fetchAll(PDO::FETCH_ASSOC);
       <h3 class="sp-modal-title">Add New User</h3>
       <button type="button" class="sp-modal-close" onclick="closeModal('modal-create-user')">&times;</button>
     </div>
-    <form method="POST" action="users.php" data-pjax autocomplete="off">
+    <form method="POST" action="users.php" data-pjax autocomplete="off" class="needs-validation" novalidate>
       <input type="hidden" name="action" value="create">
 
       <div class="sp-modal-body">
         <div class="form-group">
           <label class="form-label" for="new_username">Username <span style="color:var(--danger)">*</span></label>
           <input type="text" id="new_username" name="username" class="form-control" placeholder="e.g. maria_santos" required maxlength="80">
+          <div class="invalid-feedback">Username is required.</div>
         </div>
 
         <div class="form-group">
           <label class="form-label" for="new_fullname">Full Name <span style="color:var(--danger)">*</span></label>
           <input type="text" id="new_fullname" name="full_name" class="form-control" placeholder="e.g. Maria Santos" required maxlength="150">
+          <div class="invalid-feedback">Full name is required.</div>
         </div>
 
         <div class="form-group">
           <label class="form-label" for="new_role">Role <span style="color:var(--danger)">*</span></label>
           <select id="new_role" name="role_id" class="form-control" required>
+            <option value="" disabled selected>-- Select Role --</option>
             <option value="2">Staff (Standard operational records)</option>
             <option value="1">Administrator (Full control, settings & audits)</option>
           </select>
+          <div class="invalid-feedback">Please select a role.</div>
         </div>
 
         <div class="form-group">
           <label class="form-label" for="new_pw">Initial Password <span style="color:var(--danger)">*</span></label>
           <input type="password" id="new_pw" name="password" class="form-control" placeholder="Minimum 8 characters" required minlength="8">
+          <div class="invalid-feedback">Password must be at least 8 characters long.</div>
         </div>
       </div>
 
@@ -484,22 +515,25 @@ $users = $stmt->fetchAll(PDO::FETCH_ASSOC);
       <h3 class="sp-modal-title">Edit User Information</h3>
       <button type="button" class="sp-modal-close" onclick="closeModal('modal-edit-user')">&times;</button>
     </div>
-    <form method="POST" action="users.php" data-pjax autocomplete="off">
+    <form method="POST" action="users.php" data-pjax autocomplete="off" class="needs-validation" novalidate>
       <input type="hidden" name="action" value="update">
       <input type="hidden" id="edit_user_id" name="user_id" value="">
 
       <div class="sp-modal-body">
         <div class="form-group">
-          <label class="form-label" for="edit_fullname">Full Name</label>
+          <label class="form-label" for="edit_fullname">Full Name <span style="color:var(--danger)">*</span></label>
           <input type="text" id="edit_fullname" name="full_name" class="form-control" required maxlength="150">
+          <div class="invalid-feedback">Full name is required.</div>
         </div>
 
         <div class="form-group">
-          <label class="form-label" for="edit_role">Assigned Role</label>
+          <label class="form-label" for="edit_role">Assigned Role <span style="color:var(--danger)">*</span></label>
           <select id="edit_role" name="role_id" class="form-control" required>
+            <option value="" disabled>-- Select Role --</option>
             <option value="2">Staff</option>
             <option value="1">Administrator</option>
           </select>
+          <div class="invalid-feedback">Please select a role.</div>
         </div>
       </div>
 
@@ -518,7 +552,7 @@ $users = $stmt->fetchAll(PDO::FETCH_ASSOC);
       <h3 class="sp-modal-title">Reset User Password</h3>
       <button type="button" class="sp-modal-close" onclick="closeModal('modal-reset-pw')">&times;</button>
     </div>
-    <form method="POST" action="users.php" data-pjax autocomplete="off">
+    <form method="POST" action="users.php" data-pjax autocomplete="off" class="needs-validation" novalidate>
       <input type="hidden" name="action" value="reset_password">
       <input type="hidden" id="reset_user_id" name="user_id" value="">
 
@@ -527,6 +561,7 @@ $users = $stmt->fetchAll(PDO::FETCH_ASSOC);
         <div class="form-group">
           <label class="form-label" for="reset_new_pw">New Password <span style="color:var(--danger)">*</span></label>
           <input type="password" id="reset_new_pw" name="new_password" class="form-control" placeholder="Minimum 8 characters" required minlength="8">
+          <div class="invalid-feedback">Password must be at least 8 characters long.</div>
         </div>
       </div>
 
@@ -570,6 +605,16 @@ $users = $stmt->fetchAll(PDO::FETCH_ASSOC);
     const el = document.getElementById(id);
     if (el) el.classList.remove('open');
   }
+
+  document.querySelectorAll('form.needs-validation').forEach(function(form) {
+    form.addEventListener('submit', function(event) {
+      if (!form.checkValidity()) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+      form.classList.add('was-validated');
+    }, false);
+  });
 </script>
 
 <?php require_once __DIR__ . '/includes/footer.php'; ?>
